@@ -36,7 +36,7 @@ const operation: OperationDefinition = {
       use: 'in',
       name: 'tableName',
       type: 'string',
-      min: 0,
+      min: 1,
       max: '*',
     },
     {
