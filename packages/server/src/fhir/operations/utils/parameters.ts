@@ -24,7 +24,7 @@ import type { Request } from 'express';
 export function parseParameters<T>(input: T | Parameters): T {
   if (input && typeof input === 'object' && 'resourceType' in input && input.resourceType === 'Parameters') {
     // Convert the parameters to input
-    const parameters = (input as Parameters).parameter ?? [];
+    const parameters = input.parameter ?? [];
     return Object.fromEntries(parameters.map((p) => [p.name, p.valueString])) as T;
   } else {
     return input as T;
@@ -53,10 +53,10 @@ export function parseInputParameters<T>(operation: OperationDefinition, req: Req
       return {} as T;
     }
     validateResource(input as Parameters);
-    return parseParams(inputParameters, input.parameter) as T;
+    return parseParametersFromDefinitions(inputParameters, input.parameter) as T;
   } else {
     return Object.fromEntries(
-      inputParameters.map((param) => [param.name, validateInputParam(param, input[param.name as string])])
+      inputParameters.map((param) => [param.name, validateInputParam(param, input[param.name])])
     ) as T;
   }
 }
@@ -156,7 +156,7 @@ function validateInputParam(param: OperationDefinitionParameter, value: unknown)
   return Array.isArray(value) && max === 1 ? value[0] : value;
 }
 
-function parseParams(
+export function parseParametersFromDefinitions(
   params: OperationDefinitionParameter[],
   inputParameters: ParametersParameter[]
 ): Record<string, unknown> {
@@ -168,7 +168,7 @@ function parseParams(
     const inParams = inputParameters.filter((p) => p.name === param.name);
     let value: unknown;
     if (param.part?.length) {
-      value = inParams.map((input) => parseParams(param.part as [], input.part ?? []));
+      value = inParams.map((input) => parseParametersFromDefinitions(param.part as [], input.part ?? []));
     } else {
       value = inParams?.map((v) => {
         const paramType = param.type ?? 'string';
@@ -199,10 +199,9 @@ export function buildOutputParameters(operation: OperationDefinition, output: ob
   if (outputParameters?.length === 1 && param1?.name === 'return') {
     if (!isResource(output, param1.type as ResourceType | undefined)) {
       throw new Error(`Expected ${param1.type ?? 'Resource'} output, but got unexpected ${typeof output}`);
-    } else {
-      // Send Resource as output directly, instead of using Parameters format
-      return output as Parameters;
     }
+    // Send Resource as output directly, instead of using Parameters format
+    return output as any;
   }
   const response: Parameters = {
     resourceType: 'Parameters',
@@ -255,7 +254,7 @@ function makeParameter(param: OperationDefinitionParameter, value: unknown): Par
     for (const part of param.part) {
       const nestedValue = (value as Record<string, unknown>)[part.name ?? ''];
       checkMinMax(part, nestedValue);
-      if (nestedValue === undefined) {
+      if (isEmpty(nestedValue)) {
         continue;
       }
       if (Array.isArray(nestedValue)) {

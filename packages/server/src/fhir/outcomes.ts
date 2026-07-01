@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { ContentType, getStatus, isAccepted, isRedirect } from '@medplum/core';
-import type { OperationOutcome } from '@medplum/fhirtypes';
+import { append, ContentType, EMPTY, getOutcomeRedirectUrl, getStatus, isAccepted, isRedirect } from '@medplum/core';
+import type { Extension, OperationOutcome } from '@medplum/fhirtypes';
 import type { Response } from 'express';
 import type { Result, ValidationError } from 'express-validator';
 import { randomUUID } from 'node:crypto';
@@ -41,16 +41,21 @@ export function sendOutcome(res: Response, outcome: OperationOutcome): Response 
     res.set('Content-Location', outcome.issue[0].diagnostics);
   }
   if (isRedirect(outcome)) {
-    const uri = outcome.issue[0].details?.coding?.find((c) => c.system === 'urn:ietf:rfc:3986')?.code;
+    const uri = getOutcomeRedirectUrl(outcome);
     if (uri) {
       res.set('Location', uri);
     }
   }
+  let extension: Extension[] | undefined;
+  const tracingExt = buildTracingExtension();
+  if (tracingExt) {
+    extension = append(extension, tracingExt);
+  }
+  for (const ext of outcome.extension ?? EMPTY) {
+    extension = append(extension, ext);
+  }
   return res
     .status(getStatus(outcome))
     .type(ContentType.FHIR_JSON)
-    .json({
-      ...outcome,
-      extension: buildTracingExtension(),
-    } as OperationOutcome);
+    .json({ ...outcome, extension });
 }

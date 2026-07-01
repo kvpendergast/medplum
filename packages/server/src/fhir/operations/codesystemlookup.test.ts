@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import type { WithId } from '@medplum/core';
 import { ContentType } from '@medplum/core';
 import type { CodeSystem, OperationOutcome, Parameters } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
@@ -30,6 +31,11 @@ const testCodeSystem: CodeSystem = {
       code: 'abstract',
       uri: 'http://hl7.org/fhir/concept-properties#notSelectable',
       description: 'Code is not a real thing',
+      type: 'boolean',
+    },
+    {
+      code: 'deprecated',
+      description: 'Code is no longer in use',
       type: 'boolean',
     },
     {
@@ -103,7 +109,7 @@ describe('CodeSystem lookup', () => {
           { name: 'system', valueUri: codeSystem.url },
           { name: 'code', valueCode: '1' },
         ],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -133,7 +139,7 @@ describe('CodeSystem lookup', () => {
           { name: 'system', valueUri: codeSystem.url },
           { name: 'code', valueCode: '2' },
         ],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -168,7 +174,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: codeSystem.url, code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -198,7 +204,7 @@ describe('CodeSystem lookup', () => {
           { name: 'system', valueUri: codeSystem.url },
           { name: 'code', valueCode: 'wrong code' },
         ],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(404);
     expect(res.body).toMatchObject<OperationOutcome>({
       resourceType: 'OperationOutcome',
@@ -214,7 +220,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'code', valueCode: '1' }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(400);
     expect(res.body).toMatchObject<OperationOutcome>({
       resourceType: 'OperationOutcome',
@@ -231,7 +237,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: codeSystem.url, code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(400);
     expect(res.body).toMatchObject<OperationOutcome>({
       resourceType: 'OperationOutcome',
@@ -263,7 +269,7 @@ describe('CodeSystem lookup', () => {
           { name: 'coding', valueCoding: { system: codeSystem.url, code: '5' } },
           { name: 'version', valueString: '3.1.4' },
         ],
-      } as Parameters);
+      });
     expect(res2.status).toStrictEqual(200);
     expect(res2.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -343,7 +349,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -370,7 +376,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: 'incorrect', code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(404);
     expect(res.body).toMatchObject<OperationOutcome>({
       resourceType: 'OperationOutcome',
@@ -398,6 +404,14 @@ describe('CodeSystem lookup', () => {
             name: 'property',
             part: [
               { name: 'code', valueCode: '1' },
+              { name: 'property', valueCode: 'deprecated' },
+              { name: 'value', valueString: '1' },
+            ],
+          },
+          {
+            name: 'property',
+            part: [
+              { name: 'code', valueCode: '1' },
               { name: 'property', valueCode: 'publishedOn' },
               { name: 'value', valueString: '2020-01-01' },
             ],
@@ -411,7 +425,7 @@ describe('CodeSystem lookup', () => {
             ],
           },
         ],
-      } as Parameters);
+      });
     expect(res.status).toBe(200);
 
     const res2 = await request(app)
@@ -421,7 +435,7 @@ describe('CodeSystem lookup', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'code', valueCode: '1' }],
-      } as Parameters);
+      });
     expect(res2.status).toStrictEqual(200);
     expect(res2.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -447,6 +461,14 @@ describe('CodeSystem lookup', () => {
         {
           name: 'property',
           part: [
+            { name: 'code', valueCode: 'deprecated' },
+            { name: 'value', valueBoolean: true },
+            { name: 'description', valueString: 'Code is no longer in use' },
+          ],
+        },
+        {
+          name: 'property',
+          part: [
             { name: 'code', valueCode: 'publishedOn' },
             { name: 'value', valueDateTime: '2020-01-01' },
           ],
@@ -463,10 +485,27 @@ describe('CodeSystem lookup', () => {
   });
 
   test('Outputs translated designations', async () => {
+    const csRes = await request(app)
+      .post('/fhir/R4/CodeSystem')
+      .auth(accessToken, { type: 'bearer' })
+      .send({
+        resourceType: 'CodeSystem',
+        status: 'draft',
+        content: 'example',
+        name: 'Example allergy manifestations',
+        property: [{ code: 'status', type: 'code' }],
+        concept: [
+          {
+            code: 'HIV',
+            display: 'Hives',
+            designation: [{ value: 'Wheal' }, { language: 'fr', value: 'éruption urticaire' }],
+          },
+        ],
+      } satisfies CodeSystem);
+    const codeSystem = csRes.body as WithId<CodeSystem>;
+
     const res = await request(app)
-      .get(
-        '/fhir/R4/CodeSystem/$lookup?system=http://terminology.hl7.org/CodeSystem/operation-outcome&code=MSG_INVALID_ID'
-      )
+      .get(`/fhir/R4/CodeSystem/${codeSystem.id}/$lookup?code=HIV`)
       .set('Authorization', 'Bearer ' + accessToken)
       .set('Content-Type', 'application/fhir+json')
       .send();
@@ -474,28 +513,18 @@ describe('CodeSystem lookup', () => {
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
       parameter: expect.arrayContaining([
-        { name: 'name', valueString: 'Operation Outcome Codes' },
-        { name: 'display', valueString: 'Id not accepted' },
-        {
-          name: 'designation',
-          part: [
-            { name: 'language', valueCode: 'pl' },
-            { name: 'value', valueString: 'Identyfikator nie zaakceptowany' },
-          ],
-        },
+        { name: 'name', valueString: 'Example allergy manifestations' },
+        { name: 'display', valueString: 'Hives' },
         {
           name: 'designation',
           part: [
             { name: 'language', valueCode: 'fr' },
-            { name: 'value', valueString: 'Id non accepté' },
+            { name: 'value', valueString: 'éruption urticaire' },
           ],
         },
         {
           name: 'designation',
-          part: [
-            { name: 'language', valueCode: 'zh' },
-            { name: 'value', valueString: 'Id不被接受' },
-          ],
+          part: [{ name: 'value', valueString: 'Wheal' }],
         },
       ]),
     });

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { ContentType, forbidden, getReferenceString } from '@medplum/core';
-import type { Patient } from '@medplum/fhirtypes';
+import { ContentType, getReferenceString } from '@medplum/core';
+import type { OperationOutcome, OperationOutcomeIssue, Patient } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import request from 'supertest';
@@ -42,16 +42,20 @@ describe('On Behalf Of', () => {
 
       const org1 = 'Organization/' + randomUUID();
       const testAccount1 = await addTestUser(project, {
-        resourceType: 'AccessPolicy',
-        compartment: { reference: org1 },
-        resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org1 }],
+        accessPolicy: {
+          resourceType: 'AccessPolicy',
+          compartment: { reference: org1 },
+          resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org1 }],
+        },
       });
 
       const org2 = 'Organization/' + randomUUID();
       const testAccount2 = await addTestUser(project, {
-        resourceType: 'AccessPolicy',
-        compartment: { reference: org2 },
-        resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org2 }],
+        accessPolicy: {
+          resourceType: 'AccessPolicy',
+          compartment: { reference: org2 },
+          resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org2 }],
+        },
       });
 
       // Create a patient on behalf of test account 1
@@ -154,16 +158,20 @@ describe('On Behalf Of', () => {
 
       const org1 = 'Organization/' + randomUUID();
       const testAccount1 = await addTestUser(project, {
-        resourceType: 'AccessPolicy',
-        compartment: { reference: org1 },
-        resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org1 }],
+        accessPolicy: {
+          resourceType: 'AccessPolicy',
+          compartment: { reference: org1 },
+          resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org1 }],
+        },
       });
 
       const org2 = 'Organization/' + randomUUID();
       const testAccount2 = await addTestUser(project, {
-        resourceType: 'AccessPolicy',
-        compartment: { reference: org2 },
-        resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org2 }],
+        accessPolicy: {
+          resourceType: 'AccessPolicy',
+          compartment: { reference: org2 },
+          resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + org2 }],
+        },
       });
 
       // Create a patient on behalf of test account 1
@@ -270,8 +278,18 @@ describe('On Behalf Of', () => {
         .set('X-Medplum-On-Behalf-Of', getReferenceString(testAccount2.profile))
         .set('Content-Type', ContentType.FHIR_JSON)
         .send({ resourceType: 'Patient' });
-      expect(res1.status).toBe(403);
-      expect(res1.body).toMatchObject(forbidden);
+      expect(res1.status).toBe(400);
+      expect(res1.body).toMatchObject<OperationOutcome>({
+        resourceType: 'OperationOutcome',
+        issue: [
+          expect.objectContaining<OperationOutcomeIssue>({
+            severity: 'error',
+            code: 'invalid',
+            details: { text: 'Authentication error' },
+            diagnostics: expect.stringContaining('Forbidden'),
+          }),
+        ],
+      });
     }));
 
   test('Forbidden for cross project', () =>
@@ -300,8 +318,18 @@ describe('On Behalf Of', () => {
         .set('X-Medplum-On-Behalf-Of', getReferenceString(adminAccount2.client))
         .set('Content-Type', ContentType.FHIR_JSON)
         .send({ resourceType: 'Patient' });
-      expect(res1.status).toBe(403);
-      expect(res1.body).toMatchObject(forbidden);
+      expect(res1.status).toBe(400);
+      expect(res1.body).toMatchObject<OperationOutcome>({
+        resourceType: 'OperationOutcome',
+        issue: [
+          expect.objectContaining<OperationOutcomeIssue>({
+            severity: 'error',
+            code: 'invalid',
+            details: { text: 'Authentication error' },
+            diagnostics: expect.stringContaining('Forbidden'),
+          }),
+        ],
+      });
     }));
 
   test('Consistent meta.account behavior', () =>
@@ -323,9 +351,11 @@ describe('On Behalf Of', () => {
       // They will be the "onBehalfOf" users for all HTTP requests
       const account = 'Organization/' + randomUUID();
       const testAccount = await addTestUser(project, {
-        resourceType: 'AccessPolicy',
-        compartment: { reference: account },
-        resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + account }],
+        accessPolicy: {
+          resourceType: 'AccessPolicy',
+          compartment: { reference: account },
+          resource: [{ resourceType: 'Patient', criteria: 'Patient?_compartment=' + account }],
+        },
       });
 
       // Create a patient on behalf of test account 1

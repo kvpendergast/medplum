@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Group, Stack, Text, Title } from '@mantine/core';
+import { Divider, Group, Stack, Text, Title } from '@mantine/core';
 import { createReference, getExtension, getReferenceString } from '@medplum/core';
 import type { Encounter, Questionnaire, QuestionnaireResponse, Reference } from '@medplum/fhirtypes';
 import {
@@ -9,8 +9,8 @@ import {
   useMedplum,
   useQuestionnaireForm,
 } from '@medplum/react-hooks';
-import type { JSX } from 'react';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import type { JSX, ReactNode } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Form } from '../Form/Form';
 import { SubmitButton } from '../Form/SubmitButton';
 import { SignatureInput } from '../SignatureInput/SignatureInput';
@@ -26,6 +26,8 @@ export interface QuestionnaireFormProps {
   readonly disablePagination?: boolean;
   readonly excludeButtons?: boolean;
   readonly submitButtonText?: string;
+  /** Optional content rendered immediately below the header row, before the form items. */
+  readonly afterHeader?: ReactNode;
   readonly onChange?: (response: QuestionnaireResponse) => void;
   readonly onSubmit?: (response: QuestionnaireResponse) => void;
 }
@@ -34,11 +36,13 @@ export function QuestionnaireForm(props: QuestionnaireFormProps): JSX.Element | 
   const medplum = useMedplum();
   const [signatureRequiredSubmitted, setSignatureRequiredSubmitted] = useState(false);
   const propsRef = useRef(props);
-  propsRef.current = props;
+  const pendingChangeRef = useRef<QuestionnaireResponse | undefined>(undefined);
+  useLayoutEffect(() => {
+    propsRef.current = props;
+  });
 
   const onFormChange = useCallback((response: QuestionnaireResponse) => {
-    setSignatureRequiredSubmitted(false);
-    propsRef.current.onChange?.(response);
+    pendingChangeRef.current = response;
   }, []);
 
   const formState = useQuestionnaireForm({
@@ -51,7 +55,37 @@ export function QuestionnaireForm(props: QuestionnaireFormProps): JSX.Element | 
     onChange: onFormChange,
   });
   const formStateRef = useRef(formState);
-  formStateRef.current = formState;
+  useLayoutEffect(() => {
+    formStateRef.current = formState;
+  });
+
+  // Intentionally run after every commit.
+  //
+  // `useQuestionnaireForm` currently invokes its `onChange` callback while the form
+  // is rendering/initializing. Calling `setState` directly from that callback caused
+  // React to warn that `QuestionnaireForm` was updating a parent during render.
+  //
+  // To avoid that render-phase update, `onFormChange` stages the latest response in
+  // `pendingChangeRef`, and this effect flushes it after commit. The effect clears
+  // the ref before calling `setSignatureRequiredSubmitted(false)`, so the state
+  // update does not create an infinite loop: the rerender triggered by `setState`
+  // immediately exits because there is no longer a pending change to flush.
+  //
+  // A more complete fix would be to move `useQuestionnaireForm`'s `onChange`
+  // emission out of render entirely. Until then, this effect must run on every
+  // commit so it can detect newly staged ref-based changes that do not participate
+  // in React's dependency tracking.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const pendingChange = pendingChangeRef.current;
+    if (!pendingChange) {
+      return;
+    }
+
+    pendingChangeRef.current = undefined;
+    setSignatureRequiredSubmitted(false);
+    propsRef.current.onChange?.(pendingChange);
+  });
 
   const isSignatureRequired = useMemo(() => {
     if (formState.loading) {
@@ -110,7 +144,17 @@ export function QuestionnaireForm(props: QuestionnaireFormProps): JSX.Element | 
 
   return (
     <Form testid="questionnaire-form" onSubmit={handleSubmit}>
-      {formState.questionnaire.title && <Title>{formState.questionnaire.title}</Title>}
+      {formState.questionnaire.title && (
+        <Title order={1} fz="1.625rem" fw={700} lh={1.3} mb="xl">
+          {formState.questionnaire.title}
+        </Title>
+      )}
+      {props.afterHeader && (
+        <Stack gap="xl" mb="xl">
+          {props.afterHeader}
+          <Divider color="var(--mantine-color-gray-2)" />
+        </Stack>
+      )}
       {formState.pagination ? (
         <QuestionnaireFormStepper
           formState={formState}

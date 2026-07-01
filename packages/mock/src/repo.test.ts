@@ -45,6 +45,23 @@ describe('Mock Repo', () => {
       },
     });
     expect(result.id).toBe(id);
+    expect(result.meta.versionId).not.toBe(versionId);
+  });
+
+  test('Create resource with version ID when seeding', async () => {
+    const client = new MockClient();
+    const id = randomUUID();
+    const versionId = randomUUID();
+    const result = await client.withSeeding(() =>
+      client.createResource({
+        resourceType: 'Patient',
+        id,
+        meta: {
+          versionId,
+        },
+      })
+    );
+    expect(result.id).toBe(id);
     expect(result.meta.versionId).toBe(versionId);
   });
 
@@ -92,7 +109,7 @@ describe('Mock Repo', () => {
 
     try {
       await client.readResource('Patient', resource1.id);
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.id).toStrictEqual('not-found');

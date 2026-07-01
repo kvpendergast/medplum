@@ -4,9 +4,11 @@ import type { ProfileResource } from '@medplum/core';
 import { append, createReference, flatMapFilter, isResource, isResourceWithId, resolveId } from '@medplum/core';
 import type {
   AuditEvent,
+  AuditEventAgent,
   AuditEventAgentNetwork,
   AuditEventEntity,
   Bot,
+  ClientApplication,
   Coding,
   Extension,
   Practitioner,
@@ -18,7 +20,9 @@ import type {
 import type { BotExecutionRequest } from '../bots/types';
 import { getConfig } from '../config/loader';
 import { AuthenticatedRequestContext, buildTracingExtension, tryGetRequestContext } from '../context';
-import { getSystemRepo } from '../fhir/repo';
+import type { SystemRepository } from '../fhir/repo';
+import { getProjectSystemRepo } from '../fhir/repo';
+import { globalLogger } from '../logger';
 
 /*
  * This file includes a collection of utility functions for working with AuditEvents.
@@ -33,6 +37,17 @@ import { getSystemRepo } from '../fhir/repo';
  * See: https://dicom.nema.org/medical/dicom/current/output/chtml/part16/chapter_D.html
  */
 export const DicomCodeSystem = 'http://dicom.nema.org/resources/ontology/DCM';
+
+/**
+ * DICOM "Application" participant role, used to label an `AuditEvent.agent` that
+ * represents the authenticating software/application rather than a human user.
+ * See: https://dicom.nema.org/medical/dicom/current/output/chtml/part16/sect_CID_402.html
+ */
+export const ApplicationAgentType: Coding = {
+  system: DicomCodeSystem,
+  code: '110150',
+  display: 'Application',
+};
 
 /**
  * AuditEvent type code system.
@@ -177,6 +192,13 @@ export function createAuditEvent(
     resource?: Resource | Reference;
     searchQuery?: string;
     durationMs?: number;
+    /**
+     * The authenticating ClientApplication, recorded as an additional non-requestor
+     * `agent[]` participant when it differs from `who` (the acting profile). This
+     * captures the delegated client on on-behalf-of and SMART-on-FHIR interactions,
+     * where the client would otherwise be absent from the audit trail.
+     */
+    client?: Reference<ClientApplication>;
   }
 ): AuditEvent {
   const config = getConfig();
@@ -194,9 +216,34 @@ export function createAuditEvent(
     network = { address: remoteAddress, type: '2' };
   }
 
-  let extension = buildTracingExtension();
+  let extension: Extension[] | undefined;
+  const tracingExt = buildTracingExtension();
+  if (tracingExt) {
+    extension = append(extension, tracingExt);
+  }
   if (options?.durationMs) {
     extension = append(extension, buildDurationExtension(options.durationMs));
+  }
+
+  const agent: AuditEventAgent[] = [
+    {
+      who: applyOptionalRedaction(who) as Reference<Practitioner>,
+      requestor: true,
+      network,
+    },
+  ];
+
+  // Record the authenticating ClientApplication as an additional non-requestor
+  // agent when it differs from the acting profile. This captures the delegated
+  // client on on-behalf-of and SMART-on-FHIR interactions, where it would
+  // otherwise be absent from the audit trail. When the client is itself the
+  // actor (e.g. client_credentials), it is already `agent[0]`, so skip it.
+  if (options?.client?.reference && options.client.reference !== who?.reference) {
+    agent.push({
+      who: applyOptionalRedaction(options.client) as Reference<ClientApplication>,
+      requestor: false,
+      type: { coding: [ApplicationAgentType] },
+    });
   }
 
   const auditEvent: AuditEvent = {
@@ -207,13 +254,7 @@ export function createAuditEvent(
     action: AuditEventActionLookup[subtype.code],
     recorded: new Date().toISOString(),
     source: { observer: { identifier: { value: config.baseUrl } } },
-    agent: [
-      {
-        who: applyOptionalRedaction(who) as Reference<Practitioner>,
-        requestor: true,
-        network,
-      },
-    ],
+    agent,
     outcome,
     outcomeDesc: options?.description,
     entity,
@@ -226,7 +267,7 @@ export function createAuditEvent(
 export function logAuditEvent(auditEvent: AuditEvent): void {
   const config = getConfig();
   if (config.logAuditEvents) {
-    console.log(JSON.stringify(auditEvent));
+    globalLogger.write(JSON.stringify(auditEvent));
   }
 }
 
@@ -276,6 +317,11 @@ export async function createBotAuditEvent(
     return;
   }
 
+  let extension: Extension[] | undefined;
+  const tracingExt = buildTracingExtension();
+  if (tracingExt) {
+    extension = append(extension, tracingExt);
+  }
   const auditEvent: AuditEvent = {
     resourceType: 'AuditEvent',
     meta: {
@@ -303,18 +349,20 @@ export async function createBotAuditEvent(
     entity: createAuditEventEntities(bot, input, subscription, agent, device),
     outcome,
     outcomeDesc,
-    extension: buildTracingExtension(),
+    extension,
   };
 
   const config = getConfig();
   for (const destination of bot.auditEventDestination ?? ['resource']) {
     switch (destination) {
-      case 'resource':
-        await getSystemRepo().createResource<AuditEvent>({
+      case 'resource': {
+        const systemRepo = await getProjectSystemRepo(runAs.project);
+        await systemRepo.createResource<AuditEvent>({
           ...auditEvent,
           outcomeDesc: tail(outcomeDesc, config.maxBotLogLengthForResource ?? defaultBotOutputLength),
         });
         break;
+      }
       case 'log':
         logAuditEvent({
           ...auditEvent,
@@ -329,8 +377,12 @@ function tail(str: string, n: number): string {
   return str.substring(str.length - n);
 }
 
+const SUBSCRIPTION_AUDIT_EVENT_DESTINATION_URL =
+  'https://medplum.com/fhir/StructureDefinition/subscription-audit-event-destination';
+
 /**
  * Creates an AuditEvent for a subscription attempt.
+ * @param systemRepo - The system repository.
  * @param resource - The resource that triggered the subscription.
  * @param startTime - The time the subscription attempt started.
  * @param outcome - The outcome code.
@@ -339,6 +391,7 @@ function tail(str: string, n: number): string {
  * @param bot - Optional bot that was executed.
  */
 export async function createSubscriptionAuditEvent(
+  systemRepo: SystemRepository,
   resource: Resource,
   startTime: string,
   outcome: AuditEventOutcome,
@@ -346,10 +399,14 @@ export async function createSubscriptionAuditEvent(
   subscription?: Subscription,
   bot?: Bot
 ): Promise<void> {
-  const systemRepo = getSystemRepo();
   const auditedEvent = subscription ?? resource;
 
-  await systemRepo.createResource<AuditEvent>({
+  let extension: Extension[] | undefined;
+  const tracingExt = buildTracingExtension();
+  if (tracingExt) {
+    extension = append(extension, tracingExt);
+  }
+  const auditEvent: AuditEvent = {
     resourceType: 'AuditEvent',
     meta: {
       project: auditedEvent.meta?.project,
@@ -376,8 +433,33 @@ export async function createSubscriptionAuditEvent(
     entity: createAuditEventEntities(resource, subscription, bot),
     outcome,
     outcomeDesc,
-    extension: buildTracingExtension(),
-  });
+    extension,
+  };
+
+  // Read destination extensions from subscription
+  const destinations: string[] = [];
+  if (subscription?.extension) {
+    for (const ext of subscription.extension) {
+      if (ext.url === SUBSCRIPTION_AUDIT_EVENT_DESTINATION_URL && ext.valueCode) {
+        destinations.push(ext.valueCode);
+      }
+    }
+  }
+
+  // Default to 'resource' if no extensions found
+  const finalDestinations = destinations.length > 0 ? destinations : ['resource'];
+
+  // Process each destination
+  for (const destination of finalDestinations) {
+    switch (destination) {
+      case 'resource':
+        await systemRepo.createResource(auditEvent);
+        break;
+      case 'log':
+        logAuditEvent(auditEvent);
+        break;
+    }
+  }
 }
 
 export function createAuditEventEntities(...resources: unknown[]): AuditEventEntity[] {

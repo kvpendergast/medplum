@@ -2,17 +2,33 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { BackgroundJobContext, WithId } from '@medplum/core';
 import type { Resource } from '@medplum/fhirtypes';
-import type { MedplumServerConfig } from '../config/types';
+import type { MedplumServerConfig, WorkerName } from '../config/types';
 import { getLogger, globalLogger } from '../logger';
 import { initBatchWorker } from './batch';
-import { addCronJobs, initCronWorker } from './cron';
-import { addDownloadJobs, initDownloadWorker } from './download';
+import { initCronWorker } from './cron';
+import { initDataWarehouseSyncWorker } from './data-warehouse-sync';
+import { addDispatchJobs, initDispatchWorker } from './dispatch';
+import { initDownloadWorker } from './download';
+import { initLambdaCleanerWorker } from './lambda-cleaner';
 import { initPostDeployMigrationWorker } from './post-deploy-migration';
 import { initReindexWorker } from './reindex';
 import { initSetAccountsWorker } from './set-accounts';
-import { addSubscriptionJobs, initSubscriptionWorker } from './subscription';
+import { initSubscriptionWorker } from './subscription';
 import type { WorkerInitializer } from './utils';
 import { queueRegistry } from './utils';
+
+const workerDefs: { name: WorkerName; init: WorkerInitializer }[] = [
+  { name: 'dispatch', init: initDispatchWorker },
+  { name: 'subscription', init: initSubscriptionWorker },
+  { name: 'download', init: initDownloadWorker },
+  { name: 'cron', init: initCronWorker },
+  { name: 'reindex', init: initReindexWorker },
+  { name: 'batch', init: initBatchWorker },
+  { name: 'post-deploy-migration', init: initPostDeployMigrationWorker },
+  { name: 'set-accounts', init: initSetAccountsWorker },
+  { name: 'lambda-cleaner', init: initLambdaCleanerWorker },
+  { name: 'data-warehouse-sync', init: initDataWarehouseSyncWorker },
+];
 
 /**
  * Initializes all background workers.
@@ -20,19 +36,16 @@ import { queueRegistry } from './utils';
  */
 export function initWorkers(config: MedplumServerConfig): void {
   globalLogger.debug('Initializing workers...');
-  const initializers: WorkerInitializer[] = [
-    initSubscriptionWorker,
-    initDownloadWorker,
-    initCronWorker,
-    initReindexWorker,
-    initBatchWorker,
-    initPostDeployMigrationWorker,
-    initSetAccountsWorker,
-  ];
+  const enabledWorkers = config.workers?.enabled;
+  const enableAll = config.workers?.enabled?.includes('*');
 
-  for (const initializer of initializers) {
-    const { name, queue, worker } = initializer(config);
-    queueRegistry.add(name, queue, worker);
+  for (const { name, init } of workerDefs) {
+    const workerEnabled = enableAll || enabledWorkers === undefined || enabledWorkers.includes(name);
+    const { name: queueName, queue, worker } = init(config, { workerEnabled });
+    // a queue can be disabled, in which case, don't register it
+    if (queue) {
+      queueRegistry.add(queueName, queue, worker);
+    }
   }
   globalLogger.debug('Workers initialized');
 }
@@ -56,29 +69,9 @@ export async function addBackgroundJobs(
   context: BackgroundJobContext
 ): Promise<void> {
   try {
-    await addSubscriptionJobs(resource, previousVersion, context);
+    await addDispatchJobs(resource, previousVersion, context);
   } catch (err) {
-    getLogger().error('Error adding subscription jobs', {
-      resourceType: resource.resourceType,
-      resource: resource.id,
-      err,
-    });
-  }
-
-  try {
-    await addDownloadJobs(resource, previousVersion, context);
-  } catch (err) {
-    getLogger().error('Error adding download jobs', {
-      resourceType: resource.resourceType,
-      resource: resource.id,
-      err,
-    });
-  }
-
-  try {
-    await addCronJobs(resource, previousVersion, context);
-  } catch (err) {
-    getLogger().error('Error adding cron jobs', {
+    getLogger().error('Error adding dispatch jobs', {
       resourceType: resource.resourceType,
       resource: resource.id,
       err,

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { sleep } from '@medplum/core';
-import type { PoolClient } from 'pg';
+import type { PoolClient, PoolConfig } from 'pg';
 import { Pool } from 'pg';
 import * as semver from 'semver';
 import type { MedplumDatabaseConfig, MedplumServerConfig } from './config/types';
@@ -39,6 +39,7 @@ export function getDatabasePool(mode: DatabaseMode): Pool {
 
 export const locks = {
   migration: 1,
+  dataWarehouseSync: 2,
 };
 
 export async function initDatabase(serverConfig: MedplumServerConfig): Promise<void> {
@@ -53,16 +54,23 @@ export async function initDatabase(serverConfig: MedplumServerConfig): Promise<v
   }
 }
 
-async function initPool(config: MedplumDatabaseConfig, proxyEndpoint: string | undefined): Promise<Pool> {
+function initPoolConfig(
+  config: MedplumDatabaseConfig,
+  proxyEndpoint: string | undefined,
+  applicationName = 'medplum-server'
+): PoolConfig {
   const poolConfig = {
     host: config.host,
     port: config.port,
     database: config.dbname,
     user: config.username,
     password: config.password,
-    application_name: 'medplum-server',
+    application_name: applicationName,
     ssl: config.ssl,
-    max: config.maxConnections ?? 100,
+    max: config.maxConnections ?? DEFAULT_MAX_CONNECTIONS,
+    options: config.disableConnectionConfiguration
+      ? undefined
+      : `-c statement_timeout=${config.queryTimeout ?? DEFAULT_STATEMENT_TIMEOUT} -c default_transaction_isolation=${DEFAULT_TRANSACTION_ISOLATION} -c idle_in_transaction_session_timeout=${DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT}`,
   };
 
   if (proxyEndpoint) {
@@ -71,31 +79,45 @@ async function initPool(config: MedplumDatabaseConfig, proxyEndpoint: string | u
     poolConfig.ssl.require = true;
   }
 
+  return poolConfig;
+}
+
+async function initPool(config: MedplumDatabaseConfig, proxyEndpoint: string | undefined): Promise<Pool> {
+  const poolConfig = initPoolConfig(config, proxyEndpoint);
+
   const pool = new Pool(poolConfig);
 
   pool.on('error', (err) => {
     globalLogger.error('Database connection error', err);
   });
 
-  if (!config.disableConnectionConfiguration) {
-    pool.on('connect', (client) => {
-      client.query(`SET statement_timeout TO ${config.queryTimeout ?? 60000}`).catch((err) => {
-        globalLogger.warn('Failed to set query timeout', err);
-      });
-      client.query(`SET default_transaction_isolation TO 'REPEATABLE READ'`).catch((err) => {
-        globalLogger.warn('Failed to set default transaction isolation', err);
-      });
-    });
-  }
-
   return pool;
 }
+
+/**
+ * Escapes spaces and backslashes in a value embedded in libpq's `options` startup parameter.
+ * @see https://www.postgresql.org/docs/current/libpq-connect.html#LIBPQ-PARAMKEYWORDS-OPTIONS
+ *
+ * @param value - The value to escape.
+ * @returns The escaped value.
+ */
+export function escapePgOptionsArg(value: string): string {
+  // Correctly escape *all* backslashes and spaces using string replaceAll
+  // - replace all '\' with '\\'
+  // - then replace all ' ' with '\ '
+  return value.replaceAll('\\', '\\\\').replaceAll(' ', '\\ ');
+}
+
+const DEFAULT_MAX_CONNECTIONS = 50;
+const DEFAULT_STATEMENT_TIMEOUT = 60_000;
+const DEFAULT_TRANSACTION_ISOLATION = escapePgOptionsArg('repeatable read');
+const DEFAULT_IDLE_IN_TRANSACTION_SESSION_TIMEOUT = 30_000;
 
 export function getDefaultStatementTimeout(config: MedplumDatabaseConfig): number | 'DEFAULT' {
   if (config.disableConnectionConfiguration) {
     return 'DEFAULT';
   }
-  return config.queryTimeout ?? 60000;
+  return config.queryTimeout ?? DEFAULT_STATEMENT_TIMEOUT;
 }
 
 export async function closeDatabase(): Promise<void> {
@@ -111,23 +133,35 @@ export async function closeDatabase(): Promise<void> {
 }
 
 async function runMigrations(pool: Pool): Promise<void> {
+  return withPoolClient(async (client) => {
+    let hasLock = false;
+    try {
+      hasLock = await acquireAdvisoryLock(client, locks.migration);
+      if (!hasLock) {
+        throw new Error('Failed to acquire migration lock');
+      }
+      await client.query(`SET statement_timeout TO 0`); // Disable timeout for migrations AFTER getting lock
+      await migrate(client);
+    } catch (err: any) {
+      globalLogger.error('Database schema migration error', err);
+      throw err;
+    } finally {
+      if (hasLock) {
+        await releaseAdvisoryLock(client, locks.migration);
+      }
+    }
+  }, pool);
+}
+
+export async function withPoolClient<TResult>(
+  callback: (client: PoolClient) => Promise<TResult>,
+  pool: Pool
+): Promise<TResult> {
   const client = await pool.connect();
-  let hasLock = false;
   try {
-    hasLock = await acquireAdvisoryLock(client, locks.migration);
-    if (!hasLock) {
-      throw new Error('Failed to acquire migration lock');
-    }
-    await client.query(`SET statement_timeout TO 0`); // Disable timeout for migrations AFTER getting lock
-    await migrate(client);
-  } catch (err: any) {
-    globalLogger.error('Database schema migration error', err);
-    throw err;
+    return await callback(client);
   } finally {
-    if (hasLock) {
-      await releaseAdvisoryLock(client, locks.migration);
-    }
-    client.release(true); // Ensure migration connection is torn down and not re-used
+    client.release(true);
   }
 }
 

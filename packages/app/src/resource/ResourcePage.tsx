@@ -50,10 +50,18 @@ function getTabs(resourceType: string): string[] {
     result.push('Tools');
   }
 
+  if (resourceType === 'User') {
+    result.push('Email');
+  }
+
+  if (resourceType === 'Communication') {
+    result.push('Payload');
+  }
+
   result.push('Details', 'Edit', 'Event', 'History', 'Blame', 'JSON', 'Apps', 'Profiles');
 
   if (resourceType === 'Patient') {
-    result.push('Export');
+    result.push('Accounts', 'Export');
   }
 
   return result;

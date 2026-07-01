@@ -1,31 +1,48 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { Stack, Text, Box, ScrollArea, Group, ActionIcon, CloseButton, Avatar, ThemeIcon } from '@mantine/core';
-import type { JSX } from 'react';
-import { useState, useRef, useEffect } from 'react';
+import {
+  ActionIcon,
+  Badge,
+  Box,
+  CloseButton,
+  Code,
+  Collapse,
+  Group,
+  Paper,
+  ScrollArea,
+  Stack,
+  Text,
+  ThemeIcon,
+} from '@mantine/core';
+import { getDisplayString } from '@medplum/core';
+import type { Communication, Patient, Reference } from '@medplum/fhirtypes';
 import { useMedplum, useResource } from '@medplum/react';
-import { IconRobot, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand, IconPlus } from '@tabler/icons-react';
+import {
+  IconArrowDown,
+  IconArrowLeft,
+  IconCode,
+  IconLayoutSidebarLeftCollapse,
+  IconLayoutSidebarLeftExpand,
+  IconList,
+  IconPlus,
+  IconRobot,
+  IconUser,
+} from '@tabler/icons-react';
+import cx from 'clsx';
+import type { JSX } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { PromptComposer } from '../../pages/spaces/PromptComposer';
+import type { Message } from '../../types/spaces';
 import { showErrorNotification } from '../../utils/notifications';
+import { processMessage } from '../../utils/spaceMessaging';
+import { getDefaultModel, getProjectModels } from '../../utils/spaceModels';
+import { loadConversationMessages } from '../../utils/spacePersistence';
+import { ComponentPreview } from './ComponentPreview';
+import { HistoryList } from './HistoryList';
+import { Markdown } from './Markdown';
 import { ResourceBox } from './ResourceBox';
 import { ResourcePanel } from './ResourcePanel';
-import type { Message } from '../../types/spaces';
-import { createConversationTopic, saveMessage, loadConversationMessages } from '../../utils/spacePersistence';
-import { HistoryList } from './HistoryList';
-import { ChatInput } from '../../pages/spaces/ChatInput';
-import type { Identifier, Communication, Reference } from '@medplum/fhirtypes';
-import { getReferenceString } from '@medplum/core';
 import classes from './SpacesInbox.module.css';
-import cx from 'clsx';
-
-const fhirRequestToolsId: Identifier = {
-  value: 'ai-fhir-request-tools',
-  system: 'https://www.medplum.com/bots',
-};
-
-const resourceSummaryBotId: Identifier = {
-  value: 'ai-resource-summary',
-  system: 'https://www.medplum.com/bots',
-};
 
 interface SpaceInboxProps {
   topic: Communication | Reference<Communication> | undefined;
@@ -38,73 +55,158 @@ export function SpacesInbox(props: SpaceInboxProps): JSX.Element {
   const { topic: topicRef, onNewTopic, onSelectedItem, onAdd } = props;
   const medplum = useMedplum();
   const topic = useResource(topicRef);
+  const models = useMemo(() => getProjectModels(medplum), [medplum]);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
-  const [selectedModel, setSelectedModel] = useState('gpt-5');
+  const [selectedModel, setSelectedModel] = useState(() => getDefaultModel(models));
   const [hasStarted, setHasStarted] = useState(false);
   const [currentFhirRequest, setCurrentFhirRequest] = useState<string | undefined>();
-  const [currentTopicId, setCurrentTopicId] = useState<string | undefined>(topic?.id);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [currentTopicId, setCurrentTopicId] = useState(topic?.id);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectedResource, setSelectedResource] = useState<string | undefined>();
+  const [selectedResources, setSelectedResources] = useState<string[] | undefined>();
+  const [resourceFromComponent, setResourceFromComponent] = useState(false);
+  const [selectedPatients, setSelectedPatients] = useState<(Patient | Reference<Patient>)[]>([]);
+  const [streamingContent, setStreamingContent] = useState<string | undefined>();
+  const [streamingComponentCode, setStreamingComponentCode] = useState<string | undefined>();
+  const [componentPanelOpen, setComponentPanelOpen] = useState(false);
+  const [componentPreview, setComponentPreview] = useState<{ code: string; resources?: string[] } | undefined>();
+  const [expandedResponses, setExpandedResponses] = useState(new Set<string>());
+  const [showScrollButton, setShowScrollButton] = useState(false);
   const scrollViewportRef = useRef<HTMLDivElement>(null);
+  const isSendingRef = useRef(false);
+  const loadVersionRef = useRef(0);
+  const isAtBottomRef = useRef(true);
 
   // Load conversation when topic changes
   useEffect(() => {
     const topicId = topic?.id;
     if (topicId) {
+      if (isSendingRef.current) {
+        return;
+      }
+      loadVersionRef.current++;
+      const myVersion = loadVersionRef.current;
       const loadTopic = async (): Promise<void> => {
         try {
           setLoading(true);
           const loadedMessages = await loadConversationMessages(medplum, topicId);
+          // Check if this load is stale (a newer load or send has started)
+          if (myVersion !== loadVersionRef.current) {
+            return;
+          }
           setMessages([...loadedMessages]);
+          isAtBottomRef.current = true;
+          setShowScrollButton(false);
           setCurrentTopicId(topicId);
           setHasStarted(true);
           setSelectedResource(undefined);
+          setSelectedResources(undefined);
+          setComponentPreview(undefined);
+          setStreamingComponentCode(undefined);
+          setComponentPanelOpen(false);
         } catch (error) {
           showErrorNotification(error);
         } finally {
-          setLoading(false);
+          if (myVersion === loadVersionRef.current) {
+            setLoading(false);
+          }
         }
       };
       loadTopic().catch(showErrorNotification);
     } else {
-      // Reset state when no topic is selected
       setMessages([]);
       setHasStarted(false);
       setCurrentTopicId(undefined);
       setSelectedResource(undefined);
+      setSelectedResources(undefined);
+      setComponentPreview(undefined);
     }
   }, [topic, medplum]);
 
   useEffect(() => {
     const viewport = scrollViewportRef.current;
-    if (viewport && hasStarted) {
+    if (viewport && hasStarted && isAtBottomRef.current) {
       viewport.scrollTo({
         top: viewport.scrollHeight,
-        behavior: 'smooth',
+        behavior: 'auto',
       });
     }
-  }, [messages, hasStarted]);
+  }, [messages, hasStarted, streamingContent, loading, currentFhirRequest, streamingComponentCode]);
+
+  // Scroll again after loading finishes to show resources
+  useEffect(() => {
+    const viewport = scrollViewportRef.current;
+    if (viewport && hasStarted && !loading && isAtBottomRef.current) {
+      const timer = setTimeout(() => {
+        viewport.scrollTo({
+          top: viewport.scrollHeight,
+          behavior: 'auto',
+        });
+      }, 300);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [loading, hasStarted]);
+
+  // Track whether the user is scrolled to the bottom; pause autoscroll otherwise
+  const handleScrollPositionChange = (): void => {
+    const viewport = scrollViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+    const distanceFromBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    const atBottom = distanceFromBottom < 100;
+    isAtBottomRef.current = atBottom;
+    setShowScrollButton(!atBottom);
+  };
+
+  const scrollToBottom = (): void => {
+    const viewport = scrollViewportRef.current;
+    if (viewport) {
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+    }
+    isAtBottomRef.current = true;
+    setShowScrollButton(false);
+  };
 
   const handleSelectTopic = async (selectedTopicId: string): Promise<void> => {
+    loadVersionRef.current++;
+    const myVersion = loadVersionRef.current;
     try {
       setLoading(true);
       const loadedMessages = await loadConversationMessages(medplum, selectedTopicId);
+      if (myVersion !== loadVersionRef.current) {
+        return;
+      }
       setMessages([...loadedMessages]);
+      isAtBottomRef.current = true;
+      setShowScrollButton(false);
       setCurrentTopicId(selectedTopicId);
       setHasStarted(true);
       setSelectedResource(undefined);
+      setSelectedResources(undefined);
+      setComponentPreview(undefined);
+      setStreamingComponentCode(undefined);
+      setComponentPanelOpen(false);
     } catch (error) {
       showErrorNotification(error);
     } finally {
-      setLoading(false);
+      if (myVersion === loadVersionRef.current) {
+        setLoading(false);
+      }
     }
   };
 
-  const handleSend = async (): Promise<void> => {
-    if (!input.trim()) {
+  const handleSend = async (overrideInput?: string): Promise<void> => {
+    if (isSendingRef.current) {
+      return;
+    }
+    const text = (overrideInput ?? input).trim();
+    // A message can be sent with patient context alone, no text required
+    if (!text && selectedPatients.length === 0) {
       return;
     }
 
@@ -113,152 +215,75 @@ export function SpacesInbox(props: SpaceInboxProps): JSX.Element {
       setHasStarted(true);
     }
 
-    const userMessage: Message = { role: 'user', content: input };
+    const userMessage: Message = {
+      role: 'user',
+      content: text,
+      selectedPatients: selectedPatients.length > 0 ? selectedPatients : undefined,
+    };
     const currentMessages = [...messages, userMessage];
     setMessages(currentMessages);
+    isAtBottomRef.current = true;
+    setShowScrollButton(false);
     setInput('');
     setCurrentFhirRequest(undefined);
+    setStreamingContent(undefined);
+    setComponentPreview(undefined);
     setLoading(true);
+    isSendingRef.current = true;
+    loadVersionRef.current++;
 
     try {
-      // Create topic on first message
-      let activeTopicId = currentTopicId;
-      if (isFirstMessage) {
-        const topic = await createConversationTopic(medplum, input.substring(0, 100), selectedModel);
-        activeTopicId = topic.id;
-        setCurrentTopicId(activeTopicId);
-        setRefreshKey((prev) => prev + 1); // Refresh list to show new topic
-        // Notify parent to navigate to the new topic
-        onNewTopic(topic);
-      }
-
-      // Save user message
-      if (activeTopicId) {
-        await saveMessage(medplum, activeTopicId, userMessage, currentMessages.length - 1);
-      }
-      let response = await medplum.executeBot(fhirRequestToolsId, {
-        resourceType: 'Parameters',
-        parameter: [
-          { name: 'messages', valueString: JSON.stringify(currentMessages) },
-          { name: 'model', valueString: selectedModel },
-        ],
+      const result = await processMessage({
+        medplum,
+        input: text,
+        userMessage,
+        currentMessages,
+        currentTopicId,
+        selectedModel,
+        isFirstMessage,
+        setCurrentTopicId,
+        setRefreshKey,
+        setCurrentFhirRequest,
+        onNewTopic,
+        selectedPatients,
+        onStreamChunk: (chunk) => {
+          setStreamingContent((prev) => (prev ?? '') + chunk);
+          setCurrentFhirRequest(undefined);
+        },
+        onComponentStart: () => {
+          // Show the "Generating component..." card and open the preview panel
+          // immediately, before FHIR data is fetched and the first chunk arrives.
+          setSelectedResource(undefined);
+          setSelectedResources(undefined);
+          setComponentPanelOpen(true);
+          setStreamingComponentCode('');
+          setCurrentFhirRequest(undefined);
+        },
+        onComponentStreamChunk: (chunk) => {
+          setStreamingComponentCode((prev) => (prev ?? '') + chunk);
+          setCurrentFhirRequest(undefined);
+        },
       });
-
-      const toolCallsStr = response.parameter?.find((p: any) => p.name === 'tool_calls')?.valueString;
-      const allResourceRefs: string[] = [];
-
-      if (toolCallsStr) {
-        const toolCalls = JSON.parse(toolCallsStr);
-        const assistantMessageWithToolCalls: Message = {
-          role: 'assistant',
-          content: null,
-          tool_calls: toolCalls,
-        };
-        currentMessages.push(assistantMessageWithToolCalls);
-
-        // Save tool call message
-        if (activeTopicId) {
-          await saveMessage(medplum, activeTopicId, assistantMessageWithToolCalls, currentMessages.length - 1);
-        }
-
-        for (const toolCall of toolCalls) {
-          if (toolCall.function.name === 'fhir_request') {
-            const args =
-              typeof toolCall.function.arguments === 'string'
-                ? JSON.parse(toolCall.function.arguments)
-                : toolCall.function.arguments;
-
-            const { method, path, body } = args;
-            setCurrentFhirRequest(`${method} ${path}`);
-            let result;
-            try {
-              if (method === 'GET') {
-                result = await medplum.get(medplum.fhirUrl(path));
-              } else if (method === 'POST') {
-                result = await medplum.post(medplum.fhirUrl(path), body);
-              } else if (method === 'PUT') {
-                result = await medplum.put(medplum.fhirUrl(path), body);
-              } else if (method === 'DELETE') {
-                result = await medplum.delete(medplum.fhirUrl(path));
-              }
-
-              if (result?.resourceType === 'Bundle' && result?.entry) {
-                result.entry.forEach((entry: any) => {
-                  if (entry.resource) {
-                    const ref = getReferenceString(entry.resource);
-                    if (ref) {
-                      allResourceRefs.push(ref);
-                    }
-                  }
-                });
-              } else if (result) {
-                const ref = getReferenceString(result);
-                if (ref) {
-                  allResourceRefs.push(ref);
-                }
-              }
-
-              const toolMessage: Message = {
-                role: 'tool',
-                tool_call_id: toolCall.id,
-                content: JSON.stringify(result),
-              };
-              currentMessages.push(toolMessage);
-
-              // Save tool response message
-              if (activeTopicId) {
-                await saveMessage(medplum, activeTopicId, toolMessage, currentMessages.length - 1);
-              }
-            } catch (err: any) {
-              const errorResult = {
-                error: true,
-                message: `Unable to execute ${method}: ${path}`,
-                details: err.message || 'Unknown error',
-              };
-
-              const toolErrorMessage: Message = {
-                role: 'tool',
-                tool_call_id: toolCall.id,
-                content: JSON.stringify(errorResult),
-              };
-              currentMessages.push(toolErrorMessage);
-
-              // Save tool error message
-              if (activeTopicId) {
-                await saveMessage(medplum, activeTopicId, toolErrorMessage, currentMessages.length - 1);
-              }
-            }
-          }
-        }
-
-        response = await medplum.executeBot(resourceSummaryBotId, {
-          resourceType: 'Parameters',
-          parameter: [
-            { name: 'messages', valueString: JSON.stringify(currentMessages) },
-            { name: 'model', valueString: selectedModel },
-          ],
+      setStreamingContent(undefined);
+      setStreamingComponentCode(undefined);
+      setMessages(result.updatedMessages);
+      if (result.assistantMessage.componentCode) {
+        setComponentPreview({
+          code: result.assistantMessage.componentCode,
+          resources: result.assistantMessage.resources,
         });
+        setSelectedResource(undefined);
+        setComponentPanelOpen(true);
       }
-
-      const content = response.parameter?.find((p: any) => p.name === 'content')?.valueString;
-      if (content) {
-        const uniqueRefs = allResourceRefs.length > 0 ? [...new Set(allResourceRefs)] : undefined;
-        const assistantMessage: Message = {
-          role: 'assistant',
-          content,
-          resources: uniqueRefs,
-        };
-        setMessages([...currentMessages, assistantMessage]);
-
-        // Save assistant message
-        if (activeTopicId) {
-          await saveMessage(medplum, activeTopicId, assistantMessage, currentMessages.length);
-        }
-      }
-    } catch (error: any) {
-      setMessages([...currentMessages, { role: 'assistant', content: `Error: ${error.message}` }]);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      setMessages([...currentMessages, { role: 'assistant', content: `Error: ${errorMessage}` }]);
     } finally {
+      isSendingRef.current = false;
+      setStreamingContent(undefined);
+      setStreamingComponentCode(undefined);
       setLoading(false);
+      // componentPanelOpen intentionally left as-is so the panel stays open after streaming
     }
   };
 
@@ -269,9 +294,31 @@ export function SpacesInbox(props: SpaceInboxProps): JSX.Element {
     }
   };
 
-  const visibleMessages = messages.filter(
-    (m) => m.role !== 'system' && m.role !== 'tool' && !(m.role === 'assistant' && m.tool_calls)
-  );
+  const toggleResponse = (id: string): void => {
+    setExpandedResponses((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const visibleMessages = messages.filter((m) => m.role !== 'system');
+
+  // Map each tool response to the tool call that produced it, so each request can
+  // be rendered together with its matching response.
+  const toolResponsesByCallId = useMemo(() => {
+    const map = new Map<string, Message>();
+    for (const message of messages) {
+      if (message.role === 'tool' && message.tool_call_id) {
+        map.set(message.tool_call_id, message);
+      }
+    }
+    return map;
+  }, [messages]);
 
   return (
     <>
@@ -324,50 +371,223 @@ export function SpacesInbox(props: SpaceInboxProps): JSX.Element {
               </Text>
             </div>
           ) : (
-            <ScrollArea style={{ flex: 1 }} offsetScrollbars viewportRef={scrollViewportRef}>
-              <Stack gap="xl" p="xs">
-                {visibleMessages.map((message, index) => (
-                  <div
-                    key={index}
-                    className={cx(
-                      classes.messageWrapper,
-                      message.role === 'user' ? classes.userMessage : classes.assistantMessage
-                    )}
-                  >
-                    <Group align="flex-start" gap="sm" mb={4}>
-                      {message.role === 'assistant' && (
-                        <Avatar radius="xl" size="sm" color="blue">
-                          <IconRobot size={14} />
-                        </Avatar>
+            <ScrollArea
+              style={{ flex: 1 }}
+              viewportRef={scrollViewportRef}
+              onScrollPositionChange={handleScrollPositionChange}
+            >
+              <Stack gap="xl" py="xl" px={52} w="100%" maw={864} mx="auto">
+                {visibleMessages.map((message, index) => {
+                  // FHIR tool calls — show each request paired with its response
+                  if (message.role === 'assistant' && message.tool_calls && !message.content) {
+                    return (
+                      <div key={index} className={cx(classes.messageWrapper, classes.assistantMessage)}>
+                        <Stack gap="md">
+                          {message.tool_calls.map((tc, tcIdx) => {
+                            let args: { method?: string; path?: string } | undefined;
+                            try {
+                              args =
+                                typeof tc.function.arguments === 'string'
+                                  ? JSON.parse(tc.function.arguments)
+                                  : tc.function.arguments;
+                            } catch {
+                              /* ignore */
+                            }
+
+                            const response = tc.id ? toolResponsesByCallId.get(tc.id) : undefined;
+                            const responseKey = tc.id ?? `${index}-${tcIdx}`;
+                            const isExpanded = expandedResponses.has(responseKey);
+                            let prettyContent = response?.content ?? '';
+                            try {
+                              prettyContent = JSON.stringify(JSON.parse(response?.content ?? ''), null, 2);
+                            } catch {
+                              /* use raw */
+                            }
+
+                            return (
+                              <Stack key={responseKey} gap={6}>
+                                {args ? (
+                                  <Group gap="xs" align="flex-start" wrap="nowrap" className={classes.toolCallGroup}>
+                                    <Badge
+                                      size="sm"
+                                      color={getMethodColor(args.method)}
+                                      variant="filled"
+                                      className={classes.toolCallBadge}
+                                    >
+                                      {args.method ?? 'CALL'}
+                                    </Badge>
+                                    <Code className={classes.toolCallPath}>{args.path ?? tc.function.name}</Code>
+                                  </Group>
+                                ) : (
+                                  <Text size="xs" c="dimmed" fs="italic">
+                                    Unable to parse tool call
+                                  </Text>
+                                )}
+                                {response && (
+                                  <>
+                                    <Group
+                                      gap="xs"
+                                      style={{ cursor: 'pointer', userSelect: 'none' }}
+                                      onClick={() => toggleResponse(responseKey)}
+                                    >
+                                      <Text size="xs" fw={500} c="dimmed">
+                                        Response
+                                      </Text>
+                                      <Text size="xs" c="dimmed">
+                                        {isExpanded ? '▲' : '▼'}
+                                      </Text>
+                                    </Group>
+                                    <Collapse in={isExpanded}>
+                                      <Code block className={classes.toolResponseCode}>
+                                        {prettyContent}
+                                      </Code>
+                                    </Collapse>
+                                  </>
+                                )}
+                              </Stack>
+                            );
+                          })}
+                        </Stack>
+                      </div>
+                    );
+                  }
+
+                  // Tool responses are rendered inline with their request above
+                  if (message.role === 'tool') {
+                    return null;
+                  }
+
+                  // Standard user / assistant messages
+                  return (
+                    <div
+                      key={index}
+                      className={cx(
+                        classes.messageWrapper,
+                        message.role === 'user' ? classes.userMessage : classes.assistantMessage
                       )}
-                      <Text fw={600} size="sm" c="dimmed">
-                        {message.role === 'user' ? 'You' : 'AI Assistant'}
-                      </Text>
-                    </Group>
-                    <div className={classes.messageContent}>
-                      <Text style={{ whiteSpace: 'pre-wrap' }}>{message.content}</Text>
+                    >
+                      {message.role === 'user' && message.selectedPatients && message.selectedPatients.length > 0 && (
+                        <Stack gap={4} mb={4} align="flex-end">
+                          {message.selectedPatients.map((patient, i) => (
+                            <PatientContextBubble key={i} patient={patient} />
+                          ))}
+                        </Stack>
+                      )}
+                      {message.content && (
+                        <div className={classes.messageContent}>
+                          {message.role === 'assistant' ? (
+                            <Markdown>{message.content}</Markdown>
+                          ) : (
+                            <Text style={{ whiteSpace: 'pre-wrap' }}>{message.content}</Text>
+                          )}
+                        </div>
+                      )}
+                      {message.componentCode && (
+                        <Stack gap="xs" mt="sm" w={300} ml={message.role === 'assistant' ? 0 : 'auto'}>
+                          <Paper
+                            withBorder
+                            p="sm"
+                            style={{ cursor: 'pointer' }}
+                            onClick={() => {
+                              setSelectedResource(undefined);
+                              setSelectedResources(undefined);
+                              setComponentPreview({
+                                code: message.componentCode as string,
+                                resources: message.resources,
+                              });
+                              setComponentPanelOpen(true);
+                            }}
+                          >
+                            <Group gap="sm" wrap="nowrap">
+                              <ThemeIcon size="lg" variant="light" color="violet">
+                                <IconCode size={20} />
+                              </ThemeIcon>
+                              <Text size="sm" fw={600} c="violet.7">
+                                View Component
+                              </Text>
+                            </Group>
+                          </Paper>
+                        </Stack>
+                      )}
+                      {message.resources && message.resources.length > 0 && !message.componentCode && (
+                        <Stack gap="xs" mt="sm" w={300} ml={message.role === 'assistant' ? 0 : 'auto'}>
+                          {message.resources.length <= 2 ? (
+                            message.resources.map((resourceRef, idx) => (
+                              <ResourceBox
+                                key={idx}
+                                resourceReference={resourceRef}
+                                onClick={(ref) => {
+                                  setComponentPanelOpen(false);
+                                  setResourceFromComponent(false);
+                                  setSelectedResources(undefined);
+                                  setSelectedResource(ref);
+                                }}
+                              />
+                            ))
+                          ) : (
+                            <Paper
+                              withBorder
+                              p="sm"
+                              style={{ cursor: 'pointer' }}
+                              onClick={() => {
+                                setComponentPanelOpen(false);
+                                setSelectedResource(undefined);
+                                setResourceFromComponent(false);
+                                setSelectedResources(message.resources);
+                              }}
+                            >
+                              <Group gap="sm" wrap="nowrap">
+                                <ThemeIcon size="lg" variant="light" color="violet">
+                                  <IconList size={20} />
+                                </ThemeIcon>
+                                <Text size="sm" fw={600} c="violet.7">
+                                  {message.resources.length} results
+                                </Text>
+                              </Group>
+                            </Paper>
+                          )}
+                        </Stack>
+                      )}
                     </div>
-                    {message.resources && message.resources.length > 0 && (
-                      <Stack gap="xs" mt="sm" w={300} ml={message.role === 'assistant' ? 0 : 'auto'}>
-                        {message.resources.map((resourceRef, idx) => (
-                          <ResourceBox key={idx} resourceReference={resourceRef} onClick={setSelectedResource} />
-                        ))}
-                      </Stack>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
                 {loading && (
                   <div className={cx(classes.messageWrapper, classes.assistantMessage)}>
-                    <Group align="center" gap="sm" wrap="nowrap">
-                      <Avatar radius="xl" size="sm" color="blue">
-                        <IconRobot size={14} />
-                      </Avatar>
-                      <Box style={{ flex: 1, minWidth: 0 }}>
-                        <Text size="sm" c="dimmed" fs="italic" truncate>
-                          {currentFhirRequest ? `Executing ${currentFhirRequest}...` : 'Thinking...'}
+                    <div className={classes.messageContent}>
+                      {streamingContent && <Markdown>{streamingContent}</Markdown>}
+                      {!streamingContent && currentFhirRequest && (
+                        <Text size="sm" c="dimmed" fs="italic">
+                          Executing {currentFhirRequest}...
                         </Text>
-                      </Box>
-                    </Group>
+                      )}
+                      {!streamingContent && !currentFhirRequest && streamingComponentCode === undefined && (
+                        <Text size="sm" c="dimmed" fs="italic">
+                          Thinking...
+                        </Text>
+                      )}
+                    </div>
+                    {streamingComponentCode !== undefined && (
+                      <Stack gap="xs" mt="sm" w={300}>
+                        <Paper
+                          withBorder
+                          p="sm"
+                          style={{ cursor: 'pointer' }}
+                          onClick={() => {
+                            setSelectedResource(undefined);
+                            setComponentPanelOpen(true);
+                          }}
+                        >
+                          <Group gap="sm" wrap="nowrap">
+                            <ThemeIcon size="lg" variant="light" color="violet">
+                              <IconCode size={20} />
+                            </ThemeIcon>
+                            <Text size="sm" fw={600} c="violet.7">
+                              Generating component...
+                            </Text>
+                          </Group>
+                        </Paper>
+                      </Stack>
+                    )}
                   </div>
                 )}
               </Stack>
@@ -376,35 +596,148 @@ export function SpacesInbox(props: SpaceInboxProps): JSX.Element {
         </div>
 
         <div className={classes.inputArea}>
+          {hasStarted && showScrollButton && (
+            <div className={classes.scrollToBottomWrapper}>
+              <ActionIcon
+                variant="default"
+                radius="xl"
+                size="lg"
+                className={classes.scrollToBottomButton}
+                onClick={scrollToBottom}
+                aria-label="Scroll to bottom"
+              >
+                <IconArrowDown size={14} />
+              </ActionIcon>
+            </div>
+          )}
           <div className={classes.inputWrapper}>
-            <ChatInput
+            <PromptComposer
               input={input}
               onInputChange={setInput}
               onKeyDown={handleKeyDown}
               onSend={handleSend}
               loading={loading}
+              models={models}
               selectedModel={selectedModel}
               onModelChange={setSelectedModel}
-              backgroundColor="transparent"
+              selectedPatients={selectedPatients}
+              setSelectedPatients={setSelectedPatients}
             />
           </div>
+          <Text size="xs" c="gray.6" className={classes.inputDisclaimer}>
+            AI models can make mistakes. Please double-check important information.
+          </Text>
         </div>
       </div>
+
+      {/* Resource List Panel */}
+      {selectedResources && !selectedResource && (
+        <div className={classes.resourcePanel}>
+          <div className={classes.resourceHeader}>
+            <Text fw={600} size="sm">
+              Results ({selectedResources.length})
+            </Text>
+            <CloseButton onClick={() => setSelectedResources(undefined)} />
+          </div>
+          <ScrollArea style={{ flex: 1 }} p="md">
+            <Stack gap="xs">
+              {selectedResources.map((ref, idx) => (
+                <ResourceBox key={idx} resourceReference={ref} onClick={(r) => setSelectedResource(r)} />
+              ))}
+            </Stack>
+          </ScrollArea>
+        </div>
+      )}
 
       {/* Resource Panel */}
       {selectedResource && (
         <div className={classes.resourcePanel}>
           <div className={classes.resourceHeader}>
-            <Text fw={600} size="sm">
-              Resource Details
-            </Text>
-            <CloseButton onClick={() => setSelectedResource(undefined)} />
+            <Group gap="xs">
+              {(resourceFromComponent || selectedResources) && (
+                <ActionIcon
+                  variant="subtle"
+                  color="gray"
+                  size="sm"
+                  onClick={() => {
+                    setSelectedResource(undefined);
+                    if (resourceFromComponent) {
+                      setComponentPanelOpen(true);
+                    }
+                  }}
+                >
+                  <IconArrowLeft size={16} />
+                </ActionIcon>
+              )}
+              <Text fw={600} size="sm">
+                Resource Details
+              </Text>
+            </Group>
+            <CloseButton
+              onClick={() => {
+                setSelectedResource(undefined);
+                setSelectedResources(undefined);
+              }}
+            />
           </div>
           <ScrollArea style={{ flex: 1 }} p="md">
             <ResourcePanel key={selectedResource} resource={{ reference: selectedResource }} />
           </ScrollArea>
         </div>
       )}
+
+      {/* Component Preview Panel */}
+      {componentPanelOpen && (componentPreview || streamingComponentCode !== undefined) && (
+        <div className={classes.resourcePanel}>
+          <div className={classes.resourceHeader}>
+            <Text fw={600} size="sm">
+              Component Preview
+            </Text>
+            <CloseButton onClick={() => setComponentPanelOpen(false)} />
+          </div>
+          <ScrollArea style={{ flex: 1 }} p="md">
+            {streamingComponentCode !== undefined && (
+              <Code block style={{ whiteSpace: 'pre-wrap' }}>
+                {streamingComponentCode || ' '}
+              </Code>
+            )}
+            {streamingComponentCode === undefined && componentPreview && (
+              <ComponentPreview
+                code={componentPreview.code}
+                resources={componentPreview.resources}
+                onResourceClick={(ref) => {
+                  setComponentPanelOpen(false);
+                  setResourceFromComponent(true);
+                  setSelectedResource(ref);
+                }}
+              />
+            )}
+          </ScrollArea>
+        </div>
+      )}
     </>
+  );
+}
+
+const METHOD_COLORS: Record<string, string> = {
+  GET: 'blue',
+  POST: 'green',
+  PUT: 'orange',
+  DELETE: 'red',
+};
+
+function getMethodColor(method: string | undefined): string {
+  return METHOD_COLORS[method ?? ''] ?? 'gray';
+}
+
+function PatientContextBubble({ patient }: { patient: Patient | Reference<Patient> }): JSX.Element {
+  const resource = useResource(patient);
+  return (
+    <div className={classes.contextBubble}>
+      <Group gap={4} wrap="nowrap">
+        <IconUser size={12} />
+        <Text fz="xs">{resource ? getDisplayString(resource) : ''}</Text>
+      </Group>
+    </div>
   );
 }

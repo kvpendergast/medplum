@@ -30,7 +30,7 @@ const medplum = new MedplumClient({
 function setup(ui: ReactElement): void {
   render(
     <MemoryRouter>
-      <MedplumProvider medplum={medplum} navigate={jest.fn()}>
+      <MedplumProvider medplum={medplum} navigate={vi.fn()}>
         {ui}
       </MedplumProvider>
     </MemoryRouter>
@@ -39,37 +39,37 @@ function setup(ui: ReactElement): void {
 
 describe('MedplumLink', () => {
   beforeEach(() => {
-    locationUtils.assign = jest.fn();
+    locationUtils.assign = vi.fn();
   });
 
   test('Renders', () => {
     setup(<MedplumLink>test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/#');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/#');
   });
 
   test('Renders unknown target', () => {
     setup(<MedplumLink to={{}}>test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/#');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/#');
   });
 
   test('Renders string target', () => {
     setup(<MedplumLink to="xyz">test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/xyz');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/xyz');
   });
 
   test('Renders resource target', () => {
     setup(<MedplumLink to={{ resourceType: 'Patient', id: '123' }}>test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/Patient/123');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/Patient/123');
   });
 
   test('Renders reference target', () => {
     setup(<MedplumLink to={{ reference: 'Patient/123' }}>test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/Patient/123');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/Patient/123');
   });
 
   test('Renders with suffix', () => {
@@ -79,11 +79,11 @@ describe('MedplumLink', () => {
       </MedplumLink>
     );
     expect(screen.getByText('test')).toBeDefined();
-    expect((screen.getByText('test') as HTMLAnchorElement).href).toEqual('http://localhost/Patient/123/foo');
+    expect(screen.getByText<HTMLAnchorElement>('test').href).toEqual('http://localhost/Patient/123/foo');
   });
 
   test('Handles click with onClick', () => {
-    const onClick = jest.fn();
+    const onClick = vi.fn();
     setup(
       <MedplumLink to="xyz" onClick={onClick}>
         test
@@ -104,5 +104,16 @@ describe('MedplumLink', () => {
     setup(<MedplumLink>test</MedplumLink>);
     expect(screen.getByText('test')).toBeDefined();
     fireEvent.click(screen.getByText('test'));
+  });
+
+  test('Passes anchor DOM props through to the underlying element', () => {
+    setup(
+      <MedplumLink to="xyz" tabIndex={-1}>
+        test
+      </MedplumLink>
+    );
+    const node = screen.getByText('test');
+    expect(node).toBeDefined();
+    expect(node).toHaveAttribute('tabIndex', '-1');
   });
 });

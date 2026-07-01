@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { readJson } from '@medplum/definitions';
-import type { Bundle } from '@medplum/fhirtypes';
-import { LOINC, SNOMED, UCUM } from '../constants';
+import type { Bundle, Practitioner } from '@medplum/fhirtypes';
+import { HTTP_HL7_ORG, LOINC, SNOMED, UCUM } from '../constants';
 import type { TypedValue } from '../types';
 import { PropertyType } from '../types';
 import { indexStructureDefinitionBundle } from '../typeschema/types';
@@ -563,7 +563,7 @@ const diagnosticReport = {
 
 describe('FHIRPath Test Suite', () => {
   beforeAll(() => {
-    console.log = jest.fn();
+    console.log = vi.fn();
     indexStructureDefinitionBundle(readJson('fhir/r4/profiles-types.json') as Bundle);
     indexStructureDefinitionBundle(readJson('fhir/r4/profiles-resources.json') as Bundle);
   });
@@ -645,12 +645,15 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('(Observation.value as Quantity).unit', observation)).toStrictEqual(['lbs']);
     });
 
-    test.skip('testPolymorphismAsB', () => {
-      expect(() => evalFhirPath('(Observation.value as Period).unit', observation)).toThrow();
+    test('testPolymorphismAsB', () => {
+      // The official suite flags this as a semantic error (Period has no `unit`).
+      // Medplum evaluates dynamically, so `value as Period` on a Quantity yields the
+      // empty collection (rather than throwing), and `.unit` on empty is empty.
+      expect(evalFhirPath('(Observation.value as Period).unit', observation)).toStrictEqual([]);
     });
 
     test('testPolymorphismAsBFunction', () => {
-      expect(() => evalFhirPath('Observation.value.as(Period).start', observation)).not.toThrow();
+      expect(evalFhirPath('Observation.value.as(Period).start', observation)).toStrictEqual([]);
     });
   });
 
@@ -673,7 +676,7 @@ describe('FHIRPath Test Suite', () => {
     });
 
     test('testDollarOrderAllowedA', () => {
-      expect(() => evalFhirPath('Patient.name.skip(3).given', patient)).not.toThrow();
+      expect(evalFhirPath('Patient.name.skip(3).given', patient)).toStrictEqual([]);
     });
 
     test.skip('testDollarOrderNotAllowed', () => {
@@ -1008,7 +1011,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('(1).not() = false', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testNotInvalid', () => {
+    test('testNotInvalid', () => {
       expect(() => evalFhirPath('(1|2).not() = false', patient)).toThrow();
     });
   });
@@ -1266,8 +1269,10 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath("1.0.toQuantity() = 1.0 '1'", patient)).toStrictEqual([true]);
     });
 
-    test.skip('testStringIntegerLiteralToQuantity', () => {
-      expect(evalFhirPath("'1'.toQuantity()", patient)).toStrictEqual(["1 '1'"]);
+    test('testStringIntegerLiteralToQuantity', () => {
+      expect(evalFhirPathTyped("'1'.toQuantity()", [toTypedValue(patient)])).toStrictEqual([
+        { type: 'Quantity', value: { value: 1, unit: '1' } },
+      ]);
     });
 
     test('testStringQuantityLiteralToQuantity', () => {
@@ -1594,7 +1599,7 @@ describe('FHIRPath Test Suite', () => {
     });
   });
 
-  describe.skip('testSelect', () => {
+  describe('testSelect', () => {
     test('testSelect1', () => {
       expect(evalFhirPath('Patient.name.select(given).count() = 5', patient)).toStrictEqual([true]);
     });
@@ -1610,8 +1615,26 @@ describe('FHIRPath Test Suite', () => {
     });
     test('testResolvePolymorphism', () => {
       expect(
-        evalFhirPath('DiagnosticReport.result.resolve().value.as(Quantity).value', diagnosticReport)
+        evalFhirPath('DiagnosticReport.result.resolve().value.ofType(Quantity).value', diagnosticReport)
       ).toStrictEqual([216, 1]);
+    });
+  });
+
+  describe('testOfType', () => {
+    test('unqualified type name', () => {
+      expect(evalFhirPath('Patient.ofType(Patient).type().name', patient)).toStrictEqual(['Patient']);
+    });
+
+    test('FHIR-qualified type name', () => {
+      expect(evalFhirPath('Patient.ofType(FHIR.Patient).type().name', patient)).toStrictEqual(['Patient']);
+    });
+
+    test('FHIR-qualified type name with backticks', () => {
+      expect(evalFhirPath('Patient.ofType(FHIR.`Patient`).type().name', patient)).toStrictEqual(['Patient']);
+    });
+
+    test('non-matching type yields empty', () => {
+      expect(evalFhirPath('Patient.ofType(FHIR.Observation)', patient)).toStrictEqual([]);
     });
   });
 
@@ -1661,7 +1684,7 @@ describe('FHIRPath Test Suite', () => {
     });
   });
 
-  describe.skip('testIndexer', () => {
+  describe('testIndexer', () => {
     test('testIndexer1', () => {
       expect(evalFhirPath("Patient.name[0].given = 'Peter' | 'James'", patient)).toStrictEqual([true]);
     });
@@ -1751,7 +1774,7 @@ describe('FHIRPath Test Suite', () => {
     });
   });
 
-  describe.skip('testIif', () => {
+  describe('testIif', () => {
     test('testIif1', () => {
       expect(evalFhirPath("iif(Patient.name.exists(), 'named', 'unnamed') = 'named'", patient)).toStrictEqual([true]);
     });
@@ -1791,7 +1814,7 @@ describe('FHIRPath Test Suite', () => {
     });
   });
 
-  describe.skip('testToDecimal', () => {
+  describe('testToDecimal', () => {
     test('testToDecimal1', () => {
       expect(evalFhirPath("'1'.toDecimal() = 1", patient)).toStrictEqual([true]);
     });
@@ -2104,7 +2127,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2012-04-15T15:00:00 = @2012-04-15T10:00:00', patient)).toStrictEqual([false]);
     });
 
-    test.skip('testEquality21', () => {
+    test('testEquality21', () => {
       expect(evalFhirPath('@2012-04-15T15:30:31 = @2012-04-15T15:30:31.0', patient)).toStrictEqual([true]);
     });
 
@@ -2194,7 +2217,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2012-04-15T15:00:00 != @2012-04-15T10:00:00', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testNEquality15', () => {
+    test('testNEquality15', () => {
       expect(evalFhirPath('@2012-04-15T15:30:31 != @2012-04-15T15:30:31.0', patient)).toStrictEqual([false]);
     });
 
@@ -2214,7 +2237,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('name != name', patient)).toStrictEqual([false]);
     });
 
-    test.skip('testNEquality20', () => {
+    test('testNEquality20', () => {
       expect(evalFhirPath('name.take(2) != name.take(2).first() | name.take(2).last()', patient)).toStrictEqual([
         false,
       ]);
@@ -2302,7 +2325,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2012-04-15 ~ @2012-04-15T10:00:00', patient)).toStrictEqual([false]);
     });
 
-    test.skip('testEquivalent17', () => {
+    test('testEquivalent17', () => {
       expect(evalFhirPath('@2012-04-15T15:30:31 ~ @2012-04-15T15:30:31.0', patient)).toStrictEqual([true]);
     });
 
@@ -2352,7 +2375,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath("'a' !~ 'a'", patient)).toStrictEqual([false]);
     });
 
-    test.skip('testNotEquivalent6', () => {
+    test('testNotEquivalent6', () => {
       expect(evalFhirPath("'a' !~ 'A'", patient)).toStrictEqual([false]);
     });
 
@@ -2396,7 +2419,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2012-04-15 !~ @2012-04-15T10:00:00', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testNotEquivalent17', () => {
+    test('testNotEquivalent17', () => {
       expect(evalFhirPath('@2012-04-15T15:30:31 !~ @2012-04-15T15:30:31.0', patient)).toStrictEqual([false]);
     });
 
@@ -2562,7 +2585,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:00 <= @2014-12-13T12:00:01', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testLessOrEqual7', () => {
+    test('testLessOrEqual7', () => {
       expect(evalFhirPath('@T12:00:00 <= @T14:00:00', patient)).toStrictEqual([true]);
     });
 
@@ -2590,7 +2613,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:00 <= @2014-12-13T12:00:00', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testLessOrEqual14', () => {
+    test('testLessOrEqual14', () => {
       expect(evalFhirPath('@T12:00:00 <= @T12:00:00', patient)).toStrictEqual([true]);
     });
 
@@ -2618,7 +2641,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:01 <= @2014-12-13T12:00:00', patient)).toStrictEqual([false]);
     });
 
-    test.skip('testLessOrEqual21', () => {
+    test('testLessOrEqual21', () => {
       expect(evalFhirPath('@T12:00:01 <= @T12:00:00', patient)).toStrictEqual([false]);
     });
 
@@ -2630,11 +2653,11 @@ describe('FHIRPath Test Suite', () => {
       expect(() => evalFhirPath('@2018-03 <= @2018-03-01', patient)).not.toThrow();
     });
 
-    test.skip('testLessOrEqual24', () => {
+    test('testLessOrEqual24', () => {
       expect(() => evalFhirPath('@2018-03-01T10 <= @2018-03-01T10:30', patient)).not.toThrow();
     });
 
-    test.skip('testLessOrEqual25', () => {
+    test('testLessOrEqual25', () => {
       expect(() => evalFhirPath('@T10 <= @T10:30', patient)).not.toThrow();
     });
 
@@ -2642,7 +2665,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2018-03-01T10:30:00  <= @2018-03-01T10:30:00.0', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testLessOrEqual27', () => {
+    test('testLessOrEqual27', () => {
       expect(evalFhirPath('@T10:30:00 <= @T10:30:00.0', patient)).toStrictEqual([true]);
     });
   });
@@ -2672,7 +2695,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:00 >= @2014-12-13T12:00:01', patient)).toStrictEqual([false]);
     });
 
-    test.skip('testGreatorOrEqual7', () => {
+    test('testGreatorOrEqual7', () => {
       expect(evalFhirPath('@T12:00:00 >= @T14:00:00', patient)).toStrictEqual([false]);
     });
 
@@ -2700,7 +2723,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:00 >= @2014-12-13T12:00:00', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testGreatorOrEqual14', () => {
+    test('testGreatorOrEqual14', () => {
       expect(evalFhirPath('@T12:00:00 >= @T12:00:00', patient)).toStrictEqual([true]);
     });
 
@@ -2728,7 +2751,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2014-12-13T12:00:01 >= @2014-12-13T12:00:00', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testGreatorOrEqual21', () => {
+    test('testGreatorOrEqual21', () => {
       expect(evalFhirPath('@T12:00:01 >= @T12:00:00', patient)).toStrictEqual([true]);
     });
 
@@ -2740,11 +2763,11 @@ describe('FHIRPath Test Suite', () => {
       expect(() => evalFhirPath('@2018-03 >= @2018-03-01', patient)).not.toThrow();
     });
 
-    test.skip('testGreatorOrEqual24', () => {
+    test('testGreatorOrEqual24', () => {
       expect(() => evalFhirPath('@2018-03-01T10 >= @2018-03-01T10:30', patient)).not.toThrow();
     });
 
-    test.skip('testGreatorOrEqual25', () => {
+    test('testGreatorOrEqual25', () => {
       expect(() => evalFhirPath('@T10 >= @T10:30', patient)).not.toThrow();
     });
 
@@ -2752,7 +2775,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('@2018-03-01T10:30:00 >= @2018-03-01T10:30:00.0', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testGreatorOrEqual27', () => {
+    test('testGreatorOrEqual27', () => {
       expect(evalFhirPath('@T10:30:00 >= @T10:30:00.0', patient)).toStrictEqual([true]);
     });
   });
@@ -2850,7 +2873,7 @@ describe('FHIRPath Test Suite', () => {
       expect(() => evalFhirPath('@2018-03 > @2018-03-01', patient)).not.toThrow();
     });
 
-    test.skip('testGreaterThan24', () => {
+    test('testGreaterThan24', () => {
       expect(() => evalFhirPath('@2018-03-01T10 > @2018-03-01T10:30', patient)).not.toThrow();
     });
 
@@ -3062,7 +3085,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('(false or true) = true', patient)).toStrictEqual([true]);
     });
 
-    test.skip('testBooleanLogicOr5', () => {
+    test('testBooleanLogicOr5', () => {
       expect(evalFhirPath('(false or false) = false', patient)).toStrictEqual([true]);
     });
 
@@ -3190,7 +3213,7 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath("{} & 'b' = 'b'", patient)).toStrictEqual([true]);
     });
 
-    test.skip('testConcatenate4', () => {
+    test('testConcatenate4', () => {
       expect(() => evalFhirPath("(1 | 2 | 3) & 'b' = '1,2,3b'", patient)).toThrow();
     });
   });
@@ -3470,7 +3493,7 @@ describe('FHIRPath Test Suite', () => {
     });
   });
 
-  describe.skip('testExtension', () => {
+  describe('testExtension', () => {
     test('testExtension1', () => {
       expect(
         evalFhirPath(
@@ -3480,7 +3503,7 @@ describe('FHIRPath Test Suite', () => {
       ).toStrictEqual([true]);
     });
 
-    test('testExtension2', () => {
+    test.skip('testExtension2', () => {
       expect(evalFhirPath('Patient.birthDate.extension(%`ext-patient-birthTime`).exists()', patient)).toStrictEqual([
         true,
       ]);
@@ -3494,9 +3517,73 @@ describe('FHIRPath Test Suite', () => {
         )
       ).toStrictEqual([true]);
     });
+
+    test('davinci', () => {
+      const practitioner: Practitioner = {
+        resourceType: 'Practitioner',
+        qualification: [
+          {
+            code: {
+              coding: [
+                {
+                  system: 'http://terminology.hl7.org/CodeSystem/v2-0360',
+                  code: 'CA',
+                },
+              ],
+            },
+            extension: [
+              {
+                url: HTTP_HL7_ORG + '/fhir/us/davinci-pdex-plan-net/StructureDefinition/practitioner-qualification',
+                extension: [
+                  {
+                    // the 'code' extension comes from https://hl7.org/fhir/us/davinci-pdex-plan-net/STU1.2/StructureDefinition-qualification.html
+                    // which is a different extension ('qualification' vs' practitioner-qualification')
+                    // but adding here to ensure codes from a different codeable concept extension are not included in the result
+                    url: 'code',
+                    valueCodeableConcept: {
+                      coding: [
+                        {
+                          system: 'http://terminology.hl7.org/CodeSystem/v2-0360',
+                          code: 'BS',
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    url: 'whereValid',
+                    valueCodeableConcept: {
+                      coding: [
+                        {
+                          system: 'https://www.usps.com/',
+                          code: 'CA',
+                        },
+                        {
+                          system: 'https://www.usps.com/',
+                          code: 'MA',
+                        },
+                        {
+                          system: 'https://www.usps.com/',
+                          code: 'TX',
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      };
+      expect(
+        evalFhirPath(
+          `Practitioner.qualification.extension.where(url='${HTTP_HL7_ORG}/fhir/us/davinci-pdex-plan-net/StructureDefinition/practitioner-qualification').extension.where(url='whereValid').value.coding.code`,
+          practitioner
+        )
+      ).toStrictEqual(['CA', 'MA', 'TX']);
+    });
   });
 
-  describe.skip('testType', () => {
+  describe('testType', () => {
     test('testType1', () => {
       expect(evalFhirPath("1.type().namespace = 'System'", patient)).toStrictEqual([true]);
     });
@@ -3529,11 +3616,13 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('true is System.Boolean', patient)).toStrictEqual([true]);
     });
 
-    test('testType9', () => {
+    // TODO: requires System-vs-FHIR namespace semantics in type()/fhirPathIs, which are not yet implemented.
+    test.skip('testType9', () => {
       expect(evalFhirPath("Patient.active.type().namespace = 'FHIR'", patient)).toStrictEqual([true]);
     });
 
-    test('testType10', () => {
+    // TODO: requires System-vs-FHIR namespace semantics in type()/fhirPathIs, which are not yet implemented.
+    test.skip('testType10', () => {
       expect(evalFhirPath("Patient.active.type().name = 'boolean'", patient)).toStrictEqual([true]);
     });
 
@@ -3541,7 +3630,8 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('Patient.active.is(boolean)', patient)).toStrictEqual([true]);
     });
 
-    test('testType12', () => {
+    // TODO: requires System-vs-FHIR namespace semantics in type()/fhirPathIs, which are not yet implemented.
+    test.skip('testType12', () => {
       expect(evalFhirPath('Patient.active.is(Boolean).not()', patient)).toStrictEqual([true]);
     });
 
@@ -3549,7 +3639,8 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('Patient.active.is(FHIR.boolean)', patient)).toStrictEqual([true]);
     });
 
-    test('testType14', () => {
+    // TODO: requires System-vs-FHIR namespace semantics in type()/fhirPathIs, which are not yet implemented.
+    test.skip('testType14', () => {
       expect(evalFhirPath('Patient.active.is(System.Boolean).not()', patient)).toStrictEqual([true]);
     });
 
@@ -3581,7 +3672,8 @@ describe('FHIRPath Test Suite', () => {
       expect(evalFhirPath('Patient.ofType(FHIR.Patient).type().name', patient)).toStrictEqual(['Patient']);
     });
 
-    test('testType22', () => {
+    // TODO: requires System-vs-FHIR namespace semantics in type()/fhirPathIs, which are not yet implemented.
+    test.skip('testType22', () => {
       expect(evalFhirPath('Patient.is(System.Patient).not()', patient)).toStrictEqual([true]);
     });
 

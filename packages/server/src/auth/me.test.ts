@@ -8,7 +8,7 @@ import request from 'supertest';
 import { inviteUser } from '../admin/invite';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
-import { getSystemRepo } from '../fhir/repo';
+import { getProjectSystemRepo } from '../fhir/repo';
 import { createTestProject, withTestContext } from '../test.setup';
 import { getUserConfigurationMenu } from './me';
 import { registerNew } from './register';
@@ -91,7 +91,7 @@ describe('Me', () => {
     expect(res5.status).toBe(200);
 
     // As super admin user, add an identifier to the user
-    const systemRepo = getSystemRepo();
+    const systemRepo = await getProjectSystemRepo(project);
     await systemRepo.patchResource('User', resolveId(res4.body.user) as string, [
       {
         op: 'add',
@@ -106,6 +106,7 @@ describe('Me', () => {
     expect(res6.body).toBeDefined();
     expect(res6.body.config).toMatchObject(config);
     expect(res6.body.security).toBeDefined();
+    expect(res6.body.security.mfaRequired).toBe(false);
     expect(res6.body.security.sessions).toBeDefined();
     expect(res6.body.security.sessions[0].browser).toBeDefined();
     expect(res6.body.security.sessions[0].os).toBeDefined();
@@ -279,7 +280,8 @@ describe('Me', () => {
     expect(res3.body.security.memberships).toHaveLength(2);
 
     // Mark the 2nd ProjectMembership as inactive
-    await getSystemRepo().patchResource('ProjectMembership', inviteResponse.membership.id, [
+    const systemRepo = await getProjectSystemRepo(project);
+    await systemRepo.patchResource('ProjectMembership', inviteResponse.membership.id, [
       {
         op: 'add',
         path: '/active',
@@ -292,5 +294,82 @@ describe('Me', () => {
     expect(res4.status).toBe(200);
     expect(res4.body).toBeDefined();
     expect(res4.body.security.memberships).toHaveLength(1);
+  });
+
+  test('Project features are returned in /auth/me', async () => {
+    const email = `alice${randomUUID()}@example.com`;
+    const password = randomUUID();
+
+    const { project, accessToken } = await withTestContext(() =>
+      registerNew({
+        firstName: 'Feature',
+        lastName: 'Test',
+        projectName: 'Feature Test Project',
+        email: email,
+        password: password,
+        remoteAddress: '5.5.5.5',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/107.0.0.0',
+      })
+    );
+
+    // Set a feature on the project
+    const systemRepo = await getProjectSystemRepo(project);
+    await systemRepo.updateResource({
+      ...project,
+      features: ['bots'],
+    });
+
+    const res = await request(app).get('/auth/me').set('Authorization', `Bearer ${accessToken}`);
+    expect(res.status).toBe(200);
+    expect(res.body.project).toMatchObject({
+      resourceType: 'Project',
+      id: project.id,
+    });
+    expect(res.body.project.features).toEqual(['bots']);
+  });
+
+  test('Security mfaRequired reflects project setting', async () => {
+    const email = `mfa${randomUUID()}@example.com`;
+    const password = randomUUID();
+
+    const { project, user, accessToken } = await withTestContext(() =>
+      registerNew({
+        firstName: 'Mfa',
+        lastName: 'Required',
+        projectName: `Mfa Required Project ${randomUUID()}`,
+        email,
+        password,
+        remoteAddress: '5.5.5.5',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/107.0.0.0',
+      })
+    );
+
+    const systemRepo = await getProjectSystemRepo(project);
+
+    // By default MFA is not required.
+    const res1 = await request(app).get('/auth/me').set('Authorization', `Bearer ${accessToken}`);
+    expect(res1.status).toBe(200);
+    expect(res1.body.security.mfaRequired).toBe(false);
+
+    // Enabling the project setting makes MFA required for the user.
+    await withTestContext(() =>
+      systemRepo.updateResource({
+        ...project,
+        setting: [{ name: 'mfaRequired', valueBoolean: true }],
+      })
+    );
+    const res2 = await request(app).get('/auth/me').set('Authorization', `Bearer ${accessToken}`);
+    expect(res2.body.security.mfaRequired).toBe(true);
+
+    // The project requirement is enforced even when the user has explicitly set
+    // `User.mfaRequired` to false; the project setting can only tighten.
+    await withTestContext(() =>
+      systemRepo.updateResource({
+        ...user,
+        mfaRequired: false,
+      })
+    );
+    const res3 = await request(app).get('/auth/me').set('Authorization', `Bearer ${accessToken}`);
+    expect(res3.body.security.mfaRequired).toBe(true);
   });
 });

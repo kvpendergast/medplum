@@ -1,91 +1,83 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { TypedValue, WithId } from '@medplum/core';
-import { allOk, append, badRequest, flatMapFilter, forbidden, OperationOutcomeError } from '@medplum/core';
+import { allOk, append, badRequest, EMPTY, flatMapFilter, forbidden, OperationOutcomeError } from '@medplum/core';
 import type { FhirRequest, FhirResponse } from '@medplum/fhir-router';
-import type {
-  Coding,
-  ConceptMap,
-  ConceptMapGroupElementTargetDependsOn,
-  OperationDefinition,
-} from '@medplum/fhirtypes';
-import type { PoolClient } from 'pg';
+import type { Coding, ConceptMap, ConceptMapGroupElementTargetDependsOn } from '@medplum/fhirtypes';
 import { getAuthenticatedContext } from '../../context';
+import { DatabaseMode } from '../../database';
+import type { PgQueryable } from '../sql';
 import { InsertQuery, SelectQuery, Union } from '../sql';
+import { makeOperationDefinition } from './definitions';
 import { parseInputParameters } from './utils/parameters';
 import { findTerminologyResource, uniqueOn } from './utils/terminology';
 
-const operation: OperationDefinition = {
-  resourceType: 'OperationDefinition',
-  name: 'conceptmap-import',
-  status: 'active',
-  kind: 'operation',
-  code: 'import',
-  experimental: true,
-  resource: ['ConceptMap'],
-  system: false,
-  type: true,
-  instance: true,
-  affectsState: true,
-  parameter: [
-    { use: 'in', name: 'url', type: 'uri', min: 0, max: '1' },
-    {
-      use: 'in',
-      name: 'mapping',
-      min: 1,
-      max: '*',
-      part: [
-        { use: 'in', name: 'source', type: 'Coding', min: 1, max: '1' },
-        // `target.system` is required; leave `target.code` empty for null map
-        { use: 'in', name: 'target', type: 'Coding', min: 1, max: '1' },
-        // Default value of relationship is `equivalent`, to reduce overhead
-        {
-          use: 'in',
-          name: 'relationship',
-          type: 'code',
-          min: 0,
-          max: '1',
-          binding: {
-            strength: 'required',
-            valueSet: 'http://hl7.org/fhir/ValueSet/concept-map-equivalence',
+const operation = makeOperationDefinition(
+  { scope: 'type-and-instance', resource: 'ConceptMap' },
+  {
+    name: 'conceptmap-import',
+    code: 'import',
+    affectsState: true,
+    parameter: [
+      { use: 'in', name: 'url', type: 'uri', min: 0, max: '1' },
+      {
+        use: 'in',
+        name: 'mapping',
+        min: 1,
+        max: '*',
+        part: [
+          { use: 'in', name: 'source', type: 'Coding', min: 1, max: '1' },
+          // `target.system` is required; leave `target.code` empty for null map
+          { use: 'in', name: 'target', type: 'Coding', min: 1, max: '1' },
+          // Default value of relationship is `equivalent`, to reduce overhead
+          {
+            use: 'in',
+            name: 'relationship',
+            type: 'code',
+            min: 0,
+            max: '1',
+            binding: {
+              strength: 'required',
+              valueSet: 'http://hl7.org/fhir/ValueSet/concept-map-equivalence',
+            },
           },
-        },
-        { use: 'in', name: 'comment', type: 'string', min: 0, max: '1' },
-        {
-          use: 'in',
-          name: 'property',
-          min: 0,
-          max: '*',
-          part: [
-            { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
-            { use: 'in', name: 'value', type: 'Any', min: 1, max: '1' },
-          ],
-        },
-        {
-          use: 'in',
-          name: 'dependsOn',
-          min: 0,
-          max: '*',
-          part: [
-            { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
-            { use: 'in', name: 'value', type: 'Any', min: 0, max: '1' },
-          ],
-        },
-        {
-          use: 'in',
-          name: 'product',
-          min: 0,
-          max: '*',
-          part: [
-            { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
-            { use: 'in', name: 'value', type: 'Any', min: 0, max: '1' },
-          ],
-        },
-      ],
-    },
-    { use: 'out', name: 'return', type: 'ConceptMap', min: 1, max: '1' },
-  ],
-};
+          { use: 'in', name: 'comment', type: 'string', min: 0, max: '1' },
+          {
+            use: 'in',
+            name: 'property',
+            min: 0,
+            max: '*',
+            part: [
+              { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
+              { use: 'in', name: 'value', type: 'Any', min: 1, max: '1' },
+            ],
+          },
+          {
+            use: 'in',
+            name: 'dependsOn',
+            min: 0,
+            max: '*',
+            part: [
+              { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
+              { use: 'in', name: 'value', type: 'Any', min: 0, max: '1' },
+            ],
+          },
+          {
+            use: 'in',
+            name: 'product',
+            min: 0,
+            max: '*',
+            part: [
+              { use: 'in', name: 'code', type: 'code', min: 1, max: '1' },
+              { use: 'in', name: 'value', type: 'Any', min: 0, max: '1' },
+            ],
+          },
+        ],
+      },
+      { use: 'out', name: 'return', type: 'ConceptMap', min: 1, max: '1' },
+    ],
+  }
+);
 
 export type ConceptMapImportParameters = {
   url?: string;
@@ -107,8 +99,6 @@ export type MappingAttribute = {
   value?: TypedValue;
 };
 
-const EMPTY_ARRAY: readonly [] = Object.freeze([]);
-
 export async function conceptMapImportHandler(req: FhirRequest): Promise<FhirResponse> {
   const repo = getAuthenticatedContext().repo;
   const isSuperAdmin = repo.isSuperAdmin();
@@ -129,14 +119,17 @@ export async function conceptMapImportHandler(req: FhirRequest): Promise<FhirRes
     return [badRequest('ConceptMap to import into must be specified', `Parameters.parameter.where(name = 'url')`)];
   }
 
-  await repo.withTransaction((db) => importConceptMap(db, conceptMap, params.mapping));
+  await repo.withTransaction(async (txRepo) => {
+    const db = txRepo.getDatabaseClient(DatabaseMode.WRITER);
+    return importConceptMap(db, conceptMap, params.mapping);
+  });
   return [allOk, conceptMap];
 }
 
 export async function importConceptMap(
-  db: PoolClient,
+  db: PgQueryable,
   conceptMap: WithId<ConceptMap>,
-  mappings: readonly ConceptMapping[] = EMPTY_ARRAY
+  mappings: readonly ConceptMapping[] = EMPTY
 ): Promise<void> {
   const mappingRows: MappingRow[] = [];
   const attributeRows: (Omit<AttributeRow, 'mapping'>[] | undefined)[] = [];
@@ -157,12 +150,12 @@ export async function importConceptMap(
 function gatherResourceMappings(conceptMap: WithId<ConceptMap>): ConceptMapping[] {
   const mappings: ConceptMapping[] = [];
 
-  for (const group of conceptMap.group ?? EMPTY_ARRAY) {
-    for (const mapping of group.element ?? EMPTY_ARRAY) {
+  for (const group of conceptMap.group ?? EMPTY) {
+    for (const mapping of group.element ?? EMPTY) {
       if (!mapping.code) {
         continue;
       }
-      for (const target of mapping.target ?? EMPTY_ARRAY) {
+      for (const target of mapping.target ?? EMPTY) {
         const entry: ConceptMapping = {
           source: { system: group.source, code: mapping.code, display: mapping.display },
           target: { system: group.target, code: target.code, display: target.display },
@@ -170,11 +163,11 @@ function gatherResourceMappings(conceptMap: WithId<ConceptMap>): ConceptMapping[
           comment: target.comment,
         };
 
-        for (const dependency of target.dependsOn ?? EMPTY_ARRAY) {
+        for (const dependency of target.dependsOn ?? EMPTY) {
           const value = getAttributeValue(dependency);
           entry.dependsOn = append(entry.dependsOn, { code: dependency.property, value });
         }
-        for (const product of target.product ?? EMPTY_ARRAY) {
+        for (const product of target.product ?? EMPTY) {
           const value = getAttributeValue(product);
           entry.product = append(entry.product, { code: product.property, value });
         }
@@ -245,7 +238,7 @@ function addRowsForMapping(
   });
 
   let mappingAttributes: Omit<AttributeRow, 'mapping'>[] | undefined;
-  for (const property of mapping.property ?? EMPTY_ARRAY) {
+  for (const property of mapping.property ?? EMPTY) {
     mappingAttributes = append(mappingAttributes, {
       kind: 'property',
       uri: property.code,
@@ -253,7 +246,7 @@ function addRowsForMapping(
       value: JSON.stringify(property.value?.value),
     });
   }
-  for (const dependency of mapping.dependsOn ?? EMPTY_ARRAY) {
+  for (const dependency of mapping.dependsOn ?? EMPTY) {
     mappingAttributes = append(mappingAttributes, {
       kind: 'dependsOn',
       uri: dependency.code,
@@ -261,7 +254,7 @@ function addRowsForMapping(
       value: JSON.stringify(dependency.value?.value),
     });
   }
-  for (const product of mapping.product ?? EMPTY_ARRAY) {
+  for (const product of mapping.product ?? EMPTY) {
     mappingAttributes = append(mappingAttributes, {
       kind: 'product',
       uri: product.code,
@@ -273,7 +266,7 @@ function addRowsForMapping(
 }
 
 async function prepareMappingRows(
-  db: PoolClient,
+  db: PgQueryable,
   rows: MappingRow[]
 ): Promise<(MappingRow & { sourceSystem: number; targetSystem: number })[]> {
   if (!rows.length) {
@@ -321,7 +314,7 @@ async function prepareMappingRows(
 }
 
 async function writeMappingRows(
-  db: PoolClient,
+  db: PgQueryable,
   mappings: MappingRow[],
   attributes: (Omit<AttributeRow, 'mapping'>[] | undefined)[]
 ): Promise<void> {

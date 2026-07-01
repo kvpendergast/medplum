@@ -4,6 +4,7 @@ import { BullMQInstrumentation } from '@appsignal/opentelemetry-instrumentation-
 import { MEDPLUM_VERSION } from '@medplum/core';
 import type { Span } from '@opentelemetry/api';
 import { diag, DiagConsoleLogger, DiagLogLevel, SpanStatusCode } from '@opentelemetry/api';
+import { CompositePropagator, W3CTraceContextPropagator } from '@opentelemetry/core';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-proto';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { DataloaderInstrumentation } from '@opentelemetry/instrumentation-dataloader';
@@ -14,9 +15,15 @@ import { IORedisInstrumentation } from '@opentelemetry/instrumentation-ioredis';
 import type { PgResponseHookInformation } from '@opentelemetry/instrumentation-pg';
 import { PgInstrumentation } from '@opentelemetry/instrumentation-pg';
 import { RuntimeNodeInstrumentation } from '@opentelemetry/instrumentation-runtime-node';
+import { AWSXRayPropagator } from '@opentelemetry/propagator-aws-xray';
 import { defaultResource, resourceFromAttributes } from '@opentelemetry/resources';
 import type { MetricReader } from '@opentelemetry/sdk-metrics';
-import { PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import {
+  AggregationTemporality,
+  AggregationType,
+  InstrumentType,
+  PeriodicExportingMetricReader,
+} from '@opentelemetry/sdk-metrics';
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import type { SpanExporter } from '@opentelemetry/sdk-trace-base';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
@@ -50,9 +57,16 @@ export function initOpenTelemetry(): void {
 
   let metricReader: MetricReader | undefined = undefined;
   if (OTLP_METRICS_ENDPOINT) {
-    const exporter = new OTLPMetricExporter({ url: OTLP_METRICS_ENDPOINT });
+    const exporter = new OTLPMetricExporter({
+      url: OTLP_METRICS_ENDPOINT,
+      temporalityPreference: AggregationTemporality.DELTA,
+    });
     metricReader = new PeriodicExportingMetricReader({ exporter });
   }
+
+  const propagator = new CompositePropagator({
+    propagators: [new AWSXRayPropagator(), new W3CTraceContextPropagator()],
+  });
 
   let traceExporter: SpanExporter | undefined = undefined;
   if (OTLP_TRACES_ENDPOINT) {
@@ -63,6 +77,8 @@ export function initOpenTelemetry(): void {
     new RuntimeNodeInstrumentation(),
     new HttpInstrumentation({
       applyCustomAttributesOnSpan: httpResponseHook,
+      ignoreIncomingRequestHook: (req) => req.url === '/healthcheck',
+      requireParentforOutgoingSpans: true,
     }),
 
     new PgInstrumentation({
@@ -102,6 +118,13 @@ export function initOpenTelemetry(): void {
     instrumentations,
     metricReaders: metricReader ? [metricReader] : undefined,
     traceExporter,
+    textMapPropagator: propagator,
+    views: [
+      {
+        instrumentType: InstrumentType.HISTOGRAM,
+        aggregation: { type: AggregationType.EXPONENTIAL_HISTOGRAM },
+      },
+    ],
   });
   sdk.start();
 }

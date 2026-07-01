@@ -26,7 +26,7 @@ describe('CreateBotPage', () => {
       accessToken: '123',
       refreshToken: '456',
       profile: {
-        reference: 'Practitioner/123',
+        reference: 'Practitioner/124',
       },
       project: {
         reference: 'Project/123',
@@ -35,14 +35,14 @@ describe('CreateBotPage', () => {
   });
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      await vi.runOnlyPendingTimersAsync();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders', async () => {
@@ -83,7 +83,7 @@ describe('CreateBotPage', () => {
       });
     });
 
-    const input = screen.getByPlaceholderText('Access Policy') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Access Policy');
 
     // Enter "Example Access Policy"
     await act(async () => {
@@ -92,7 +92,7 @@ describe('CreateBotPage', () => {
 
     // Wait for the drop down
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Press the down arrow

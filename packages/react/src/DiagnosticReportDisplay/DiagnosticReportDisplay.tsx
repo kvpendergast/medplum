@@ -77,6 +77,14 @@ export function DiagnosticReportDisplay(props: DiagnosticReportDisplayProps): JS
         <ObservationTable hideObservationNotes={props.hideObservationNotes} value={diagnosticReport.result} />
       )}
       {specimenNotes.length > 0 && <NoteDisplay value={specimenNotes} />}
+      {diagnosticReport.conclusion && (
+        <Stack mt="md">
+          <Text fw={500} size="sm" c="dimmed">
+            Conclusion
+          </Text>
+          <Text>{diagnosticReport.conclusion}</Text>
+        </Stack>
+      )}
     </Stack>
   );
 }
@@ -219,7 +227,7 @@ interface ObservationRowProps {
 function ObservationRow(props: ObservationRowProps): JSX.Element | null {
   const observation = useResource(props.value);
 
-  if (!observation || props.ancestorIds?.includes(observation.id as string)) {
+  if (!observation || props.ancestorIds?.includes(observation.id)) {
     return null;
   }
 
@@ -267,9 +275,7 @@ function ObservationRow(props: ObservationRowProps): JSX.Element | null {
       {observation.hasMember && (
         <ObservationRowGroup
           value={observation.hasMember as Reference<Observation>[]}
-          ancestorIds={
-            props.ancestorIds ? [...props.ancestorIds, observation.id as string] : [observation.id as string]
-          }
+          ancestorIds={props.ancestorIds ? [...props.ancestorIds, observation.id] : [observation.id]}
           hideObservationNotes={props.hideObservationNotes}
         />
       )}

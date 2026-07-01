@@ -5,23 +5,20 @@ import type { Extension, Questionnaire, QuestionnaireResponse } from '@medplum/f
 import { MockClient } from '@medplum/mock';
 import { MedplumProvider, QUESTIONNAIRE_SIGNATURE_REQUIRED_URL, QuestionnaireItemType } from '@medplum/react-hooks';
 import { randomUUID } from 'crypto';
-import each from 'jest-each';
 import { MemoryRouter } from 'react-router';
-import { act, fireEvent, render, screen } from '../test-utils/render';
+import {
+  act,
+  clickAutocompleteOption,
+  fireEvent,
+  render,
+  screen,
+  selectAutocompleteOption,
+  typeInAutocomplete,
+} from '../test-utils/render';
 import type { QuestionnaireFormProps } from './QuestionnaireForm';
 import { QuestionnaireForm } from './QuestionnaireForm';
 
 const medplum = new MockClient();
-
-jest.mock('signature_pad', () => {
-  return jest.fn().mockImplementation(() => ({
-    fromDataURL: jest.fn().mockResolvedValue(undefined),
-    clear: jest.fn(),
-    addEventListener: jest.fn(),
-    removeEventListener: jest.fn(),
-    toDataURL: jest.fn(() => 'data:image/png;base64,signature-data'),
-  }));
-});
 
 const pageExtension: Extension[] = [
   {
@@ -51,14 +48,14 @@ async function setup(args: QuestionnaireFormProps): Promise<void> {
 
 describe('QuestionnaireForm', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      vi.runOnlyPendingTimers();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders empty', async () => {
@@ -67,7 +64,7 @@ describe('QuestionnaireForm', () => {
         resourceType: 'Questionnaire',
         status: 'active',
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
     expect(screen.getByTestId('questionnaire-form')).toBeInTheDocument();
   });
@@ -85,14 +82,14 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
     expect(screen.getByText('Hello world')).toBeInTheDocument();
   });
 
   test('Groups', async () => {
-    const onChange = jest.fn();
-    const onSubmit = jest.fn();
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -195,7 +192,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Groups with QuestionnaireResponse', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -373,7 +370,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Handles submit', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -472,7 +469,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Handles submit (empty)', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -499,7 +496,7 @@ describe('QuestionnaireForm', () => {
     expect(response.source).toBeDefined();
   });
 
-  each([
+  test.each([
     [QuestionnaireItemType.decimal, 'number', '123.456'],
     [QuestionnaireItemType.integer, 'number', '123'],
     [QuestionnaireItemType.date, 'date', '2020-01-01'],
@@ -509,7 +506,7 @@ describe('QuestionnaireForm', () => {
     [QuestionnaireItemType.text, 'textarea', 'lorem ipsum'],
     [QuestionnaireItemType.url, 'text', 'https://example.com/'],
     [QuestionnaireItemType.quantity, 'number', '123'],
-  ]).test('%s question', async (propertyType: QuestionnaireItemType, inputType: string, value: string) => {
+  ])('%s question', async (propertyType: QuestionnaireItemType, inputType: string, value: string) => {
     await setup({
       questionnaire: {
         resourceType: 'Questionnaire',
@@ -522,10 +519,10 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
-    const input = screen.getByLabelText('q1') as HTMLInputElement;
+    const input = screen.getByLabelText<HTMLInputElement>('q1');
     expect(input).toBeInTheDocument();
     if (inputType !== 'date' && inputType !== 'datetime-local') {
       // JSDOM does not support date or datetime-local
@@ -552,10 +549,10 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
-    const input = screen.getByLabelText('q1') as HTMLInputElement;
+    const input = screen.getByLabelText<HTMLInputElement>('q1');
     expect(input).toBeInTheDocument();
 
     await act(async () => {
@@ -566,7 +563,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Choice input', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -621,7 +618,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Choice valueReference default value', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -646,14 +643,14 @@ describe('QuestionnaireForm', () => {
               },
               {
                 valueReference: {
-                  reference: 'Organization/123',
+                  reference: 'Organization/125',
                 },
               },
             ],
             initial: [
               {
                 valueReference: {
-                  reference: 'Organization/123',
+                  reference: 'Organization/125',
                 },
               },
             ],
@@ -667,13 +664,13 @@ describe('QuestionnaireForm', () => {
     expect(radioButton1).toBeInTheDocument();
     expect((radioButton1 as HTMLInputElement).checked).toBe(false);
 
-    const radioButton2 = screen.getByLabelText('Organization/123');
+    const radioButton2 = screen.getByLabelText('Organization/125');
     expect(radioButton2).toBeInTheDocument();
     expect((radioButton2 as HTMLInputElement).checked).toBe(true);
   });
 
   test('Choice valueCoding default value', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -745,7 +742,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByText('q1')).toBeInTheDocument();
@@ -773,7 +770,7 @@ describe('QuestionnaireForm', () => {
       questionnaire: 'Questionnaire/' + questionnaire.id,
       source: {
         display: 'Alice Smith',
-        reference: 'Practitioner/123',
+        reference: 'Practitioner/124',
       },
       item: [
         {
@@ -792,7 +789,7 @@ describe('QuestionnaireForm', () => {
       ],
     };
 
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({ questionnaire, onSubmit });
 
@@ -820,7 +817,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Reference input', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -848,7 +845,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Drop down choice input', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -932,7 +929,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('referenceResource extension with valueCodeableConcept', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -975,7 +972,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('referenceResource extension with valueCode', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -1001,7 +998,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Drop down choice input default value', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -1055,7 +1052,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Drop down choice input default reference value', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -1087,7 +1084,7 @@ describe('QuestionnaireForm', () => {
               },
               {
                 valueReference: {
-                  reference: 'Organization/123',
+                  reference: 'Organization/125',
                   display: 'Test Organization',
                 },
               },
@@ -1095,7 +1092,7 @@ describe('QuestionnaireForm', () => {
             initial: [
               {
                 valueReference: {
-                  reference: 'Organization/123',
+                  reference: 'Organization/125',
                   display: 'Test Organization',
                 },
               },
@@ -1158,7 +1155,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     const visibleQuestionInput = screen.getByLabelText(visibleQuestion + ' *');
@@ -1200,10 +1197,10 @@ describe('QuestionnaireForm', () => {
     });
 
     // Check that the values in the visibleQuestion and question2-string inputs are still the same.
-    const updatedVisibleQuestionInput = screen.getByLabelText(visibleQuestion + ' *') as HTMLInputElement;
+    const updatedVisibleQuestionInput = screen.getByLabelText<HTMLInputElement>(visibleQuestion + ' *');
     expect(updatedVisibleQuestionInput.value).toBe('Test Value');
 
-    const updatedQuestion2StringInput = screen.getByLabelText('visible question 2') as HTMLInputElement;
+    const updatedQuestion2StringInput = screen.getByLabelText<HTMLInputElement>('visible question 2');
     expect(updatedQuestion2StringInput.value).toBe('Test Value for Question2-String');
   });
 
@@ -1258,7 +1255,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
     // The form should render
     expect(screen.getByText(visibleQuestion)).toBeInTheDocument();
@@ -1289,7 +1286,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Value Set Choice', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
     await setup({
       questionnaire: {
         resourceType: 'Questionnaire',
@@ -1308,27 +1305,10 @@ describe('QuestionnaireForm', () => {
       onSubmit,
     });
 
-    const input = screen.getByRole('searchbox') as HTMLInputElement;
+    const input = screen.getByRole('searchbox');
     expect(input).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Test' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Press the down arrow
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' });
-    });
-
-    // Press "Enter"
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', charCode: 13 });
-    });
+    await selectAutocompleteOption(input, 'Test', 'Test Display');
 
     await act(async () => {
       fireEvent.click(screen.getByText('Submit'));
@@ -1373,14 +1353,14 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByPlaceholderText('No Answers Defined')).toBeInTheDocument();
   });
 
   test('Value Set Checkbox', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     // Mock the value set expansion to return more than 30 items
     const mockValueSet = {
@@ -1395,7 +1375,7 @@ describe('QuestionnaireForm', () => {
     };
 
     // Mock the medplum client's valueSetExpand method
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(mockValueSet);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(mockValueSet);
 
     await setup({
       questionnaire: {
@@ -1431,11 +1411,11 @@ describe('QuestionnaireForm', () => {
 
     // Wait for value set to load
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Check that checkboxes are rendered
-    const checkboxes = screen.getAllByRole('checkbox');
+    const checkboxes = await screen.findAllByRole('checkbox');
     expect(checkboxes.length).toBeGreaterThan(0);
 
     // Verify that the cutoff message is shown
@@ -1474,7 +1454,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Value Set Radio Button', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
     await setup({
       questionnaire: {
         resourceType: 'Questionnaire',
@@ -1509,11 +1489,11 @@ describe('QuestionnaireForm', () => {
 
     // Wait for value set to load
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Check that radio buttons are rendered
-    const radioButtons = screen.getAllByRole('radio');
+    const radioButtons = await screen.findAllByRole('radio');
     expect(radioButtons.length).toBeGreaterThan(0);
 
     // Click the first radio button
@@ -1534,7 +1514,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Non-Value Set Checkbox', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -1601,7 +1581,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Checkbox Selection and Deselection', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -1690,7 +1670,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Multi-Select Dropdown Value Set', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     // Mock the value set expansion to return multiple items
     const mockValueSet = {
@@ -1705,7 +1685,7 @@ describe('QuestionnaireForm', () => {
     };
 
     // Mock the medplum client's valueSetExpand method
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(mockValueSet);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(mockValueSet);
 
     await setup({
       questionnaire: {
@@ -1742,49 +1722,21 @@ describe('QuestionnaireForm', () => {
 
     // Wait for value set to load
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     const searchInput = screen.getByPlaceholderText('Select items');
     expect(searchInput).toBeInTheDocument();
 
-    // Select first option
-    await act(async () => {
-      fireEvent.change(searchInput, { target: { value: 'Test Display 0' } });
-    });
-
-    // Wait for options to load
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Select the first option
-    await act(async () => {
-      fireEvent.keyDown(searchInput, { key: 'ArrowDown', code: 'ArrowDown' });
-      fireEvent.keyDown(searchInput, { key: 'Enter', code: 'Enter' });
-    });
+    await selectAutocompleteOption(searchInput, 'Test Display 0', 'Test Display 0');
 
     // Clear input for second selection
     await act(async () => {
       fireEvent.change(searchInput, { target: { value: '' } });
     });
 
-    // Select second option
-    await act(async () => {
-      fireEvent.change(searchInput, { target: { value: 'Test Display 2' } });
-    });
-
-    // Wait for options to load
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Select the second option (press ArrowDown twice to get to the third option)
-    await act(async () => {
-      fireEvent.keyDown(searchInput, { key: 'ArrowDown', code: 'ArrowDown' });
-      fireEvent.keyDown(searchInput, { key: 'ArrowDown', code: 'ArrowDown' });
-      fireEvent.keyDown(searchInput, { key: 'Enter', code: 'Enter' });
-    });
+    await typeInAutocomplete(searchInput, 'Test Display 2');
+    await clickAutocompleteOption('Test Display 2');
 
     // Submit the form
     await act(async () => {
@@ -1842,7 +1794,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     const dropDown = screen.getByText('choice');
@@ -1895,7 +1847,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     // The form should render
@@ -1919,6 +1871,159 @@ describe('QuestionnaireForm', () => {
 
     // Now the hidden text should be visible
     expect(screen.queryByText('Hidden Text')).toBeInTheDocument();
+  });
+
+  test('Disabled enableWhen items excluded from submitted response', async () => {
+    const onSubmit = vi.fn();
+    await setup({
+      questionnaire: {
+        resourceType: 'Questionnaire',
+        status: 'active',
+        id: 'enable-when-submit',
+        title: 'Enable When',
+        item: [
+          {
+            linkId: 'q1',
+            text: "Enabled when the answer is 'Yes'",
+            type: 'choice',
+            answerOption: [{ valueString: 'Yes' }, { valueString: 'No' }],
+          },
+          {
+            linkId: 'q2',
+            type: 'choice',
+            text: "Displayed because the answer is 'Yes'!",
+            enableWhen: [{ question: 'q1', operator: '=', answerString: 'Yes' }],
+            answerOption: [{ valueString: 'Yes' }, { valueString: 'No' }],
+          },
+        ],
+      },
+      onSubmit,
+    });
+
+    // Pick "Yes" on Q1 to enable Q2
+    await act(async () => {
+      fireEvent.click(screen.getAllByLabelText('Yes')[0]);
+    });
+
+    // Pick "Yes" on Q2
+    await act(async () => {
+      fireEvent.click(screen.getAllByLabelText('Yes')[1]);
+    });
+
+    // Switch Q1 back to "No" to disable Q2
+    await act(async () => {
+      fireEvent.click(screen.getAllByLabelText('No')[0]);
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Submit'));
+    });
+
+    expect(onSubmit).toHaveBeenCalled();
+    const response = onSubmit.mock.calls[0][0];
+    const submittedLinkIds = (response.item ?? []).map((i: { linkId: string }) => i.linkId);
+    expect(submittedLinkIds).toEqual(['q1']);
+  });
+
+  test('Questionnaire hidden extension', async () => {
+    await setup({
+      questionnaire: {
+        resourceType: 'Questionnaire',
+        status: 'active',
+        id: 'hidden-extension',
+        title: 'Hidden Extension Example',
+        item: [
+          {
+            linkId: 'q1',
+            text: 'Visible Question',
+            type: 'string',
+          },
+          {
+            linkId: 'q2',
+            text: 'Hidden Question',
+            type: 'string',
+            extension: [
+              {
+                url: 'http://hl7.org/fhir/StructureDefinition/questionnaire-hidden',
+                valueBoolean: true,
+              },
+            ],
+          },
+          {
+            linkId: 'q3',
+            text: 'Another Visible Question',
+            type: 'string',
+          },
+        ],
+      },
+      onSubmit: vi.fn(),
+    });
+
+    // Visible questions should be rendered
+    expect(screen.getByText('Visible Question')).toBeInTheDocument();
+    expect(screen.getByText('Another Visible Question')).toBeInTheDocument();
+
+    // Hidden question should not be rendered
+    expect(screen.queryByText('Hidden Question')).not.toBeInTheDocument();
+  });
+
+  test('Questionnaire hidden extension takes precedence over enableWhen', async () => {
+    await setup({
+      questionnaire: {
+        resourceType: 'Questionnaire',
+        status: 'active',
+        id: 'hidden-precedence',
+        title: 'Hidden Precedence Example',
+        item: [
+          {
+            linkId: 'q1',
+            text: 'Trigger Question',
+            type: 'choice',
+            answerOption: [
+              {
+                valueString: 'Yes',
+              },
+              {
+                valueString: 'No',
+              },
+            ],
+          },
+          {
+            linkId: 'q2',
+            text: 'Should Be Hidden',
+            type: 'string',
+            extension: [
+              {
+                url: 'http://hl7.org/fhir/StructureDefinition/questionnaire-hidden',
+                valueBoolean: true,
+              },
+            ],
+            enableWhen: [
+              {
+                question: 'q1',
+                operator: '=',
+                answerString: 'Yes',
+              },
+            ],
+          },
+        ],
+      },
+      onSubmit: vi.fn(),
+    });
+
+    // Trigger question should be visible
+    expect(screen.getByText('Trigger Question')).toBeInTheDocument();
+
+    // Hidden question should not be rendered even when enableWhen condition is met
+    expect(screen.queryByText('Should Be Hidden')).not.toBeInTheDocument();
+
+    // Click on "Yes" to satisfy enableWhen condition
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Yes'));
+    });
+
+    // Hidden question should still not be rendered because hidden extension takes precedence
+    expect(screen.queryByText('Should Be Hidden')).not.toBeInTheDocument();
   });
 
   test('Multi Select', async () => {
@@ -1981,7 +2086,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByText('q1')).toBeInTheDocument();
@@ -2036,7 +2141,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByText('q1')).toBeInTheDocument();
@@ -2085,22 +2190,19 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
-    });
-
-    const dropDown = screen.getByText('choice');
-
-    await act(async () => {
-      fireEvent.click(dropDown);
+      onSubmit: vi.fn(),
     });
 
     await act(async () => {
-      fireEvent.change(dropDown, { target: 'Yes' });
+      fireEvent.click(screen.getByLabelText('Yes'));
     });
 
     await act(async () => {
-      fireEvent.change(dropDown, { target: 'No' });
+      fireEvent.click(screen.getByLabelText('No'));
     });
+
+    expect(screen.getByLabelText('Yes')).toBeChecked();
+    expect(screen.getByLabelText('No')).toBeChecked();
   });
 
   test('Multi Select Code shows with no data', async () => {
@@ -2132,7 +2234,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByText('q1')).toBeInTheDocument();
@@ -2143,7 +2245,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Nested repeat', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
     await setup({
       questionnaire: {
         resourceType: 'Questionnaire',
@@ -2238,11 +2340,12 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Question 1'), { target: { value: 'answer' } });
+      const input = document.getElementById('question1-0') as HTMLInputElement;
+      fireEvent.change(input, { target: { value: 'answer' } });
     });
 
     await act(async () => {
@@ -2252,6 +2355,59 @@ describe('QuestionnaireForm', () => {
     expect(screen.getAllByText('Question Group').length).toBe(2);
 
     expect(screen.getAllByText('Question 2').length).toBe(2);
+  });
+
+  test('Repeating string items maintain values when typing', async () => {
+    const onSubmit = vi.fn();
+
+    await setup({
+      questionnaire: {
+        resourceType: 'Questionnaire',
+        status: 'active',
+        item: [
+          {
+            linkId: 'q1',
+            text: 'Repeating String Question',
+            type: 'string',
+            repeats: true,
+          },
+        ],
+      },
+      onSubmit,
+    });
+
+    // Get the first input by id
+    const firstInput = document.getElementById('q1-0') as HTMLInputElement;
+    expect(firstInput).toBeInTheDocument();
+
+    // Type in the first field
+    await act(async () => {
+      fireEvent.change(firstInput, { target: { value: 'first value' } });
+    });
+
+    // Add a second item
+    await act(async () => {
+      fireEvent.click(screen.getByText('Add Item'));
+    });
+
+    // Get both inputs by id
+    const secondInput = document.getElementById('q1-1') as HTMLInputElement;
+    expect(secondInput).toBeInTheDocument();
+
+    // Type in the second field
+    await act(async () => {
+      fireEvent.change(secondInput, { target: { value: 'second value' } });
+    });
+
+    // Submit and verify both values are preserved
+    await act(async () => {
+      fireEvent.click(screen.getByText('Submit'));
+    });
+
+    expect(onSubmit).toHaveBeenCalled();
+
+    const response = onSubmit.mock.calls[0][0];
+    expect(response.item[0].answer).toEqual([{ valueString: 'first value' }, { valueString: 'second value' }]);
   });
 
   test('No Answers Defined', async () => {
@@ -2284,7 +2440,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByPlaceholderText('No Answers Defined')).toBeInTheDocument();
@@ -2321,7 +2477,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByPlaceholderText('No Answers Defined')).toBeInTheDocument();
@@ -2343,7 +2499,7 @@ describe('QuestionnaireForm', () => {
           },
         ],
       },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     expect(screen.getByPlaceholderText('No Answers Defined')).toBeInTheDocument();
@@ -2374,26 +2530,16 @@ describe('QuestionnaireForm', () => {
         ],
       },
       subject: { reference: 'Patient/123' },
-      onSubmit: jest.fn(),
+      onSubmit: vi.fn(),
     });
 
     // Add a spy on medplum.searchResources
-    const searchResources = jest.spyOn(medplum, 'searchResources');
+    const searchResources = vi.spyOn(medplum, 'searchResources');
 
-    // Get the search input
-    const input = screen.getByRole('searchbox') as HTMLInputElement;
+    const input = screen.getByRole('searchbox');
+    await typeInAutocomplete(input, 'Test');
 
-    // Enter "Simpson"
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Test' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    expect(screen.getByText('Test 1')).toBeDefined();
+    expect(await screen.findByText('Test 1')).toBeInTheDocument();
     expect(searchResources).toHaveBeenCalledTimes(1);
     expect(searchResources.mock.calls[0][0]).toBe('Observation');
     expect(searchResources.mock.calls[0][1]).toBeInstanceOf(URLSearchParams);
@@ -2404,7 +2550,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Questionnaire CalculatedExpression with boolean field', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2486,7 +2632,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Questionnaire CalculatedExpression failed to evaluate expression', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2531,7 +2677,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Questionnaire CalculatedExpression with nested groups', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2610,7 +2756,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Questionnaire CalculatedExpression with nested groups and QuestionnaireResponse', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2709,7 +2855,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Required radio button choice validation', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2752,7 +2898,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Required dropdown choice validation', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2808,7 +2954,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Required value set dropdown validation', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2859,7 +3005,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Required value set radio button validation', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2892,7 +3038,7 @@ describe('QuestionnaireForm', () => {
     });
 
     await act(async () => {
-      jest.runAllTimers();
+      vi.runAllTimers();
     });
 
     const radioButtons = screen.getAllByRole('radio');
@@ -2916,7 +3062,7 @@ describe('QuestionnaireForm', () => {
   });
 
   test('Required boolean field validation', async () => {
-    const onSubmit = jest.fn();
+    const onSubmit = vi.fn();
 
     await setup({
       questionnaire: {
@@ -2989,7 +3135,7 @@ describe('QuestionnaireForm', () => {
     test('Renders signature input when signature is required', async () => {
       await setup({
         questionnaire: signatureRequiredQuestionnaire,
-        onSubmit: jest.fn(),
+        onSubmit: vi.fn(),
       });
 
       expect(screen.getByLabelText('Signature input area')).toBeInTheDocument();
@@ -3009,14 +3155,14 @@ describe('QuestionnaireForm', () => {
             },
           ],
         },
-        onSubmit: jest.fn(),
+        onSubmit: vi.fn(),
       });
 
       expect(screen.queryByLabelText('Signature input area')).not.toBeInTheDocument();
     });
 
     test('Shows error message when submit is attempted without signature', async () => {
-      const onSubmit = jest.fn();
+      const onSubmit = vi.fn();
 
       await setup({
         questionnaire: signatureRequiredQuestionnaire,

@@ -1,66 +1,45 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type {
-  BackgroundJobInteraction,
-  Filter,
-  SearchParameterDetails,
-  SearchRequest,
-  TypedValue,
-  TypedValueWithPath,
-  ValidatorOptions,
-  WithId,
-} from '@medplum/core';
+import type { BackgroundJobInteraction, FhirPathPatch, Filter, Operation, SearchRequest, WithId } from '@medplum/core';
 import {
   AccessPolicyInteraction,
   accessPolicySupportsInteraction,
   allOk,
+  append,
   badRequest,
-  convertToSearchableDates,
-  convertToSearchableNumbers,
-  convertToSearchableQuantities,
-  convertToSearchableReferences,
-  convertToSearchableStrings,
-  convertToSearchableTokens,
-  convertToSearchableUris,
-  createReference,
   deepClone,
   deepEquals,
   DEFAULT_MAX_SEARCH_COUNT,
+  EMPTY,
   evalFhirPathTyped,
   extractAccountReferences,
-  flatMapFilter,
+  fhirpathPatchTypedValue,
   forbidden,
   formatSearchQuery,
-  getReferenceString,
   getStatus,
   gone,
   isGone,
   isNotFound,
-  isObject,
   isOk,
   isResource,
+  isResourceType,
   isResourceWithId,
   isUUID,
   normalizeErrorString,
   normalizeOperationOutcome,
   notFound,
   OperationOutcomeError,
-  Operator,
   parseReference,
   parseSearchRequest,
   preconditionFailed,
-  PropertyType,
+  projectAdminResourceTypes,
   protectedResourceTypes,
   readInteractions,
   resolveId,
   satisfiedAccessPolicy,
-  SearchParameterType,
-  serverError,
   sleep,
   stringify,
-  toPeriod,
   toTypedValue,
-  validateResource,
   validateResourceType,
 } from '@medplum/core';
 import type { CreateResourceOptions, ReadHistoryOptions, UpdateResourceOptions } from '@medplum/fhir-router';
@@ -71,31 +50,33 @@ import type {
   Binary,
   Bundle,
   BundleEntry,
-  CodeableConcept,
-  Coding,
+  ClientApplication,
   Meta,
+  OperationDefinition,
+  OperationDefinitionParameter,
   OperationOutcome,
-  OperationOutcomeIssue,
+  Parameters,
   Project,
   Reference,
   Resource,
   ResourceType,
-  SearchParameter,
-  StructureDefinition,
-  ValueSet,
 } from '@medplum/fhirtypes';
+import assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
-import type { Pool, PoolClient } from 'pg';
-import type { Operation } from 'rfc6902';
-import { v4 } from 'uuid';
+import type { PoolClient } from 'pg';
 import { getConfig } from '../config/loader';
-import type { ArrayColumnPaddingConfig } from '../config/types';
-import { syntheticR4Project, systemResourceProjectId } from '../constants';
+import { syntheticR4Project } from '../constants';
 import { AuthenticatedRequestContext, tryGetRequestContext } from '../context';
-import { DatabaseMode, getDatabasePool } from '../database';
+import { DatabaseMode } from '../database';
 import { getLogger } from '../logger';
 import { incrementCounter, recordHistogramValue } from '../otel/otel';
-import { getRedis } from '../redis';
+import {
+  cleanupUserSubs,
+  getUserActiveWebSocketSubscriptionCount,
+  removeActiveSubscriptions,
+  removeUserActiveWebSocketSubscriptions,
+} from '../pubsub';
 import { getBinaryStorage } from '../storage/loader';
 import type { AuditEventSubtype } from '../util/auditevent';
 import {
@@ -115,40 +96,37 @@ import {
 import { patchObject } from '../util/patch';
 import { addBackgroundJobs } from '../workers';
 import { addSubscriptionJobs } from '../workers/subscription';
-import type { FhirRateLimiter } from './fhirquota';
-import { validateResourceWithJsonSchema } from './jsonschema';
-import type { HumanNameResource } from './lookups/humanname';
-import { getHumanNameSortValue } from './lookups/humanname';
-import { getStandardAndDerivedSearchParameters } from './lookups/util';
-import { clamp } from './operations/utils/parameters';
-import { findTerminologyResource } from './operations/utils/terminology';
-import { validateCodingInValueSet } from './operations/valuesetvalidatecode';
+import { checkWebSocketSubscriptionLimit } from '../ws/subscriptions';
+import { FhirQuotaCost } from './fhirquota';
+import { clamp, makeOperationDefinitionParameter, parseParametersFromDefinitions } from './operations/utils/parameters';
 import { getPatients } from './patient';
 import { preCommitValidation } from './precommit';
 import { replaceConditionalReferences, validateResourceReferences } from './references';
+import { removeField } from './repository/field-utils';
+import { removeCachedProfile } from './repository/profile-cache';
+import type { ConnectionScope, StatementTimeoutOptions } from './repository/repository-connection';
+import { RepositoryConnection } from './repository/repository-connection';
+import type { CacheEntry } from './repository/resource-cache';
+import {
+  deleteResourceCacheEntries,
+  deleteResourceCacheEntry,
+  getResourceCacheEntries,
+  getResourceCacheEntry,
+  setResourceCacheEntry,
+} from './repository/resource-cache';
+import { buildDeletedResourceRow, buildResourceRow } from './repository/row-builder';
+import { validateRepositoryResource } from './repository/validation';
 import type { ResourceCap } from './resource-cap';
 import { getFullUrl } from './response';
 import { rewriteAttachments, RewriteMode } from './rewrite';
 import type { SearchOptions } from './search';
 import { buildSearchExpression, searchByReferenceImpl, searchImpl } from './search';
-import type { ColumnSearchParameterImplementation } from './searchparameter';
-import { getSearchParameterImplementation, lookupTables } from './searchparameter';
-import type { Expression, TransactionIsolationLevel } from './sql';
-import {
-  Condition,
-  DeleteQuery,
-  Disjunction,
-  InsertQuery,
-  normalizeDatabaseError,
-  periodToRangeString,
-  PostgresError,
-  SelectQuery,
-} from './sql';
-import { buildTokenColumns } from './token-column';
+import { lookupTables } from './searchparameter';
+import { GLOBAL_SHARD_ID } from './sharding';
+import type { Expression, PgQueryable } from './sql';
+import { Condition, DeleteQuery, Disjunction, InsertQuery, SelectQuery } from './sql';
 
-const defaultTransactionAttempts = 2;
-const defaultExpBackoffBaseDelayMs = 50;
-const retryableTransactionErrorCodes: string[] = [PostgresError.SerializationFailure];
+export type { StatementTimeoutOptions } from './repository/repository-connection';
 
 /**
  * The RepositoryContext interface defines standard metadata for repository actions.
@@ -157,6 +135,12 @@ const retryableTransactionErrorCodes: string[] = [PostgresError.SerializationFai
  * such as "who is the current user?" and "what is the current project?"
  */
 export interface RepositoryContext {
+  /**
+   * The shard ID for this repository. Currently ignored.
+   * Defaults to GLOBAL_SHARD_ID if not specified.
+   */
+  shardId?: string;
+
   /**
    * The current author reference.
    * This should be a FHIR reference string (i.e., "resourceType/id").
@@ -170,6 +154,17 @@ export interface RepositoryContext {
    * This value will be included in every resource as meta.onBehalfOf.
    */
   onBehalfOf?: Reference;
+
+  /**
+   * The authenticating ClientApplication for the current login, when present.
+   * This is the application that obtained the access token, which may differ
+   * from the acting `author` (e.g. when using `X-Medplum-On-Behalf-Of`, or for
+   * a SMART on FHIR app acting on behalf of a user). It is recorded as an
+   * additional non-requestor `agent[]` participant on per-interaction AuditEvents
+   * so the audit trail captures which client performed an action.
+   * Absent on the pure `client_credentials` / system paths.
+   */
+  client?: Reference<ClientApplication>;
 
   remoteAddress?: string;
 
@@ -231,11 +226,11 @@ export interface RepositoryContext {
    * 3) "compartment" - References to all compartments the resource is in.
    */
   extendedMode?: boolean;
-}
 
-export interface CacheEntry<T extends Resource = Resource> {
-  resource: T;
-  projectId: string;
+  /**
+   * Optional flag to skip scheduling background jobs for writes.
+   */
+  skipBackgroundJobs?: boolean;
 }
 
 export interface InteractionOptions {
@@ -255,21 +250,25 @@ export interface ProcessAllResourcesOptions {
   delayBetweenPagesMs?: number;
 }
 
+function addSyntheticR4ProjectIfMissing(context: RepositoryContext): void {
+  if (context.projects && !context.projects.some((project) => project.id === syntheticR4Project.id)) {
+    // Repositories with a project scope can also see the synthetic R4 project,
+    // but repeated construction from the same context must not append duplicates.
+    context.projects.push(syntheticR4Project);
+  }
+}
+
 /**
  * The Repository class manages reading and writing to the FHIR repository.
  * It is a thin layer on top of the database.
  * Repository instances should be created per author and project.
  */
-export class Repository extends FhirRepository<PoolClient> implements Disposable {
+export class Repository extends FhirRepository implements Disposable {
   private readonly context: RepositoryContext;
-  private conn?: PoolClient;
-  private readonly disposable: boolean = true;
-  private transactionDepth = 0;
+  private readonly connection: RepositoryConnection;
+  private readonly connectionScope: ConnectionScope;
+  private readonly ownsConnection: boolean;
   private closed = false;
-  mode: RepositoryMode;
-
-  private preCommitCallbacks: (() => Promise<void>)[] = [];
-  private postCommitCallbacks: (() => Promise<void>)[] = [];
 
   /**
    * The version to be set on resources when they are inserted/updated into the database.
@@ -290,38 +289,126 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * 10. 08/27/25 - Added HumanName sort columns (https://github.com/medplum/medplum/pull/7304)
    * 11. 09/25/25 - Added ConceptMapping lookup table (https://github.com/medplum/medplum/pull/7469)
    * 12. 12/01/25 - Added search param `Bot-cds-hook` (https://github.com/medplum/medplum/pull/7933)
+   * 13. 01/05/25 - Added search params: ActivityDefinition-code, Communication-priority, Communication-priority-order, ProjectMembership-active (https://github.com/medplum/medplum/pull/8160)
+   * 14. 04/14/26 - Added search params: ProjectMembership-admin, Practitioner-qualification-code (https://github.com/medplum/medplum/pull/8919)
+   *                and sort inline array columns (https://github.com/medplum/medplum/pull/8961)
+   * 15. 05/19/26 - Added range-column search strategy (https://github.com/medplum/medplum/pull/9159)
+   *                Project.features (https://github.com/medplum/medplum/pull/9049)
+   *                Login.preAuthorizedCodeHash (https://github.com/medplum/medplum/pull/9231)
+   *                Project.link (https://github.com/medplum/medplum/pull/9159)
+   * 16. 06/30/26 - Added search param: Provenance-activity (https://github.com/medplum/medplum/pull/9709)
    */
-  static readonly VERSION: number = 12;
+  static readonly VERSION: number = 16;
 
-  constructor(context: RepositoryContext, conn?: PoolClient) {
+  /**
+   * Constructs a new Repository instance.
+   * @param context - The context of the repository.
+   * @param connection - (optional) The connection to use for the repository. See
+   * {@link RepositoryConnection.withTransaction} for more details.
+   * @param scope - (optional) The repository connection scope to use for the repository.
+   */
+  constructor(context: RepositoryContext, connection?: RepositoryConnection, scope?: ConnectionScope) {
     super();
+    addSyntheticR4ProjectIfMissing(context);
     this.context = context;
-    this.context.projects?.push(syntheticR4Project);
+    this.ownsConnection = connection === undefined;
+    this.connection = connection ?? new RepositoryConnection();
+    this.connectionScope = scope ?? this.connection.getCurrentScope();
     if (!this.context.author?.reference) {
       throw new Error('Invalid author reference');
     }
-
-    if (conn) {
-      this.conn = conn;
-      this.disposable = false;
-    }
-
-    // Default to writer mode
-    // In the future, as we do more testing and validation, we will explore defaulting to reader mode
-    // However, for now, we default to writer and only use reader mode for requests guaranteed not to have consistency risks
-    this.mode = RepositoryMode.WRITER;
   }
 
+  get mode(): RepositoryMode {
+    return this.connection.mode;
+  }
+
+  /**
+   * Convenience method to create a new repository with the same context but a new connection.
+   * @returns A new repository with the same context but a new connection.
+   */
   clone(): Repository {
-    return new Repository(this.context, this.conn);
+    this.assertUsable(); // technically not needed, but the implementation has been a moving target, so keep it locked down
+    return new Repository(this.context);
+  }
+
+  /**
+   * Creates a repository with the same RepositoryContext and RepositoryConnection as the current repository for
+   * provided transaction scope. The current repository's connection must already be in a transaction.
+   * @param scope - The scope of the repository.
+   * @returns A repository with the same context as the current repository, but valid for the duration of the current transaction as well
+   * as post-commit callbacks.
+   */
+  private createTransactionScopedRepo(scope: ConnectionScope): this {
+    if (!this.connection.isInTransaction()) {
+      throw new Error('Not in transaction');
+    }
+    // use this.constructor to create the same concrete class, e.g. SystemRepository vs Repository, as this instance.
+    const RepositoryConstructor = this.constructor as new (
+      context: RepositoryContext,
+      connection?: RepositoryConnection,
+      scope?: ConnectionScope
+    ) => this;
+    return new RepositoryConstructor(this.context, this.connection, scope);
+  }
+
+  get shardId(): string {
+    return this.context.shardId ?? GLOBAL_SHARD_ID;
+  }
+
+  /**
+   * Use this when you need elevated privileges within request handling.
+   * This reuses the same DB connection, if one exists, to stay within the same transaction.
+   * @returns a SystemRepository for the same shard as this repository.
+   */
+  getSystemRepo(): SystemRepository {
+    this.assertUsable();
+    const contextDefaults: SystemRepositoryContextDefaults = {
+      skipBackgroundJobs: this.context.skipBackgroundJobs,
+    };
+
+    let systemRepo: SystemRepository;
+    if (this.connection.hasConnection()) {
+      systemRepo = createSystemRepository(this.shardId, this.connection, this.connectionScope, contextDefaults);
+    } else {
+      systemRepo = createSystemRepository(this.shardId, undefined, undefined, contextDefaults);
+    }
+    return systemRepo;
+  }
+
+  withOverrideConfig(config: Pick<RepositoryContext, 'extendedMode'>): Repository {
+    this.assertUsable();
+    let repo: Repository;
+    if (this.connection.hasConnection()) {
+      repo = new Repository({ ...this.context, ...config }, this.connection, this.connectionScope);
+    } else {
+      repo = new Repository({ ...this.context, ...config });
+    }
+    return repo;
   }
 
   setMode(mode: RepositoryMode): void {
-    this.mode = mode;
+    this.assertUsable();
+    this.connection.setMode(mode);
   }
 
-  private rateLimiter(): FhirRateLimiter | undefined {
-    return !this.isSuperAdmin() ? tryGetRequestContext()?.fhirRateLimiter : undefined;
+  async recordFhirQuota(points: number): Promise<void> {
+    this.assertUsable();
+    const ctx = tryGetRequestContext();
+    const limiter = this.isSuperAdmin() ? undefined : ctx?.fhirRateLimiter;
+    if (ctx instanceof AuthenticatedRequestContext && ctx.isAsync) {
+      // Do not enforce rate limits in async context; instead, slow down the consumer
+      // in proportion to the weight of the operation being performed
+      const delay = points * getConfig().asyncDelayScaling;
+      if (this.connection.isInTransaction()) {
+        // Don't hold the transaction open, but shift the delay to after the transaction commits
+        await this.postCommit(() => sleep(delay));
+      } else {
+        await sleep(delay);
+      }
+    } else {
+      await limiter?.consume(points);
+    }
   }
 
   private resourceCap(): ResourceCap | undefined {
@@ -331,6 +418,10 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
   currentProject(): WithId<Project> | undefined {
     return this.context.currentProject;
+  }
+
+  effectiveAccessPolicy(): Readonly<AccessPolicy> | undefined {
+    return this.context.accessPolicy;
   }
 
   /**
@@ -347,16 +438,18 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     if (projectId === this.context.currentProject?.id) {
       return this.context.currentProject;
     }
-    return getSystemRepo().readResource<Project>('Project', projectId);
+    return this.getSystemRepo().readResource<Project>('Project', projectId);
   }
 
   async createResource<T extends Resource>(resource: T, options?: CreateResourceOptions): Promise<WithId<T>> {
-    await this.rateLimiter()?.recordWrite();
+    await this.recordFhirQuota(FhirQuotaCost.WRITE);
     await this.resourceCap()?.created();
 
     if (options?.assignedId && resource.id && !this.context.superAdmin) {
       // NB: To be removed after proper client assigned ID support is added
-      const systemRepo = getSystemRepo();
+      const systemRepo = this.getSystemRepo();
+      // ensure writer so the existing read goes to the writer
+      systemRepo.setMode(RepositoryMode.WRITER);
       try {
         const existing = await systemRepo.readResourceImpl(resource.resourceType, resource.id);
         if (existing) {
@@ -393,7 +486,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   }
 
   generateId(): string {
-    return v4();
+    return randomUUID();
   }
 
   async readResource<T extends Resource>(
@@ -401,7 +494,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     id: string,
     options?: ReadResourceOptions
   ): Promise<WithId<T>> {
-    await this.rateLimiter()?.recordRead();
+    await this.recordFhirQuota(FhirQuotaCost.READ);
 
     const startTime = Date.now();
     try {
@@ -444,7 +537,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       //   throw new OperationOutcomeError(notFound);
       // }
       if (this.canPerformInteraction(AccessPolicyInteraction.READ, cacheRecord.resource)) {
-        return cacheRecord.resource;
+        return this.authorizeBinarySecurityContext(cacheRecord.resource);
       }
     }
 
@@ -455,14 +548,14 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     return this.readResourceFromDatabase(resourceType, id);
   }
 
-  private async readResourceFromDatabase<T extends Resource>(resourceType: string, id: string): Promise<T> {
+  private async readResourceFromDatabase<T extends Resource>(resourceType: string, id: string): Promise<WithId<T>> {
     if (!isUUID(id)) {
       throw new OperationOutcomeError(notFound);
     }
 
     const builder = new SelectQuery(resourceType).column('content').column('deleted').where('id', '=', id);
 
-    this.addSecurityFilters(builder, resourceType);
+    this.addSecurityFilters(builder, resourceType, AccessPolicyInteraction.READ);
 
     const rows = await builder.execute(this.getDatabaseClient(DatabaseMode.READER));
     if (rows.length === 0) {
@@ -474,12 +567,27 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     }
 
     const resource = JSON.parse(rows[0].content as string) as WithId<T>;
-    await this.setCacheEntry(resource);
+
+    if (!this.connection.isInTransaction()) {
+      // Only set cache entry if not in a transaction
+      await this.setCacheEntry(resource);
+    }
+
+    return this.authorizeBinarySecurityContext(resource);
+  }
+
+  private async authorizeBinarySecurityContext<T extends Resource>(resource: T): Promise<T> {
+    if (resource.resourceType === 'Binary' && resource.securityContext && !this.isSuperAdmin()) {
+      if (resource.securityContext.reference?.startsWith('Binary/')) {
+        throw new OperationOutcomeError(notFound);
+      }
+      await this.readReference(resource.securityContext);
+    }
     return resource;
   }
 
   async readReferences<T extends Resource>(references: Reference<T>[]): Promise<(WithId<T> | Error)[]> {
-    await this.rateLimiter()?.recordRead(references.length);
+    await this.recordFhirQuota(references.length * FhirQuotaCost.READ);
     const cacheEntries = await this.getCacheEntries(references);
     const result: (WithId<T> | Error)[] = new Array(references.length);
 
@@ -527,7 +635,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
         if (!this.canPerformInteraction(AccessPolicyInteraction.READ, cacheEntry.resource)) {
           return new OperationOutcomeError(notFound);
         }
-        return cacheEntry.resource;
+        return await this.authorizeBinarySecurityContext(cacheEntry.resource);
       }
       return await this.readResourceFromDatabase(resourceType, id);
     } catch (err) {
@@ -544,10 +652,11 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   }
 
   async readReference<T extends Resource>(reference: Reference<T>): Promise<WithId<T>> {
+    this.assertUsable();
     let parts: [T['resourceType'], string];
     try {
       parts = parseReference(reference);
-    } catch (_err) {
+    } catch {
       throw new OperationOutcomeError(badRequest('Invalid reference'));
     }
     return this.readResource(parts[0], parts[1]);
@@ -569,7 +678,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     id: string,
     options?: ReadHistoryOptions
   ): Promise<Bundle<T>> {
-    await this.rateLimiter()?.recordHistory();
+    await this.recordFhirQuota(FhirQuotaCost.HISTORY);
     const startTime = Date.now();
     try {
       let resource: T | undefined = undefined;
@@ -662,8 +771,8 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     }
   }
 
-  async readVersion<T extends Resource>(resourceType: T['resourceType'], id: string, vid: string): Promise<T> {
-    await this.rateLimiter()?.recordRead();
+  async readVersion<T extends Resource>(resourceType: T['resourceType'], id: string, vid: string): Promise<WithId<T>> {
+    await this.recordFhirQuota(FhirQuotaCost.READ);
     const startTime = Date.now();
     const versionReference = { reference: `${resourceType}/${id}/_history/${vid}` };
     try {
@@ -692,7 +801,9 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
         throw new OperationOutcomeError(notFound);
       }
 
-      const result = this.removeHiddenFields(JSON.parse(rows[0].content as string));
+      const result = await this.authorizeBinarySecurityContext(
+        this.removeHiddenFields(JSON.parse(rows[0].content as string))
+      );
       const durationMs = Date.now() - startTime;
       this.logEvent(VreadInteraction, AuditEventOutcome.Success, undefined, { resource: versionReference, durationMs });
       return result;
@@ -704,14 +815,14 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   }
 
   async updateResource<T extends Resource>(resource: T, options?: UpdateResourceOptions): Promise<WithId<T>> {
-    await this.rateLimiter()?.recordWrite();
+    await this.recordFhirQuota(FhirQuotaCost.WRITE);
 
     const startTime = Date.now();
     try {
       let result: WithId<T>;
       if (options?.ifMatch) {
         // Conditional update requires transaction
-        result = await this.withTransaction(() => this.updateResourceImpl(resource, false, options));
+        result = await this.withTransaction((txRepo) => txRepo.updateResourceImpl(resource, false, options));
       } else {
         result = await this.updateResourceImpl(resource, false, options);
       }
@@ -751,13 +862,22 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     return resource;
   }
 
+  private validateBinarySecurityContext(resource: Resource): void {
+    if (resource.resourceType === 'Binary' && resource.securityContext?.reference?.startsWith('Binary/')) {
+      throw new OperationOutcomeError(badRequest('Binary.securityContext cannot reference another Binary'));
+    }
+  }
+
   private async updateResourceImpl<T extends Resource>(
     resource: T,
     create: boolean,
     options?: UpdateResourceOptions
   ): Promise<WithId<T>> {
+    // Promote before pre-commit validation and existing-resource reads.
+    this.setMode(RepositoryMode.WRITER);
     const interaction = create ? AccessPolicyInteraction.CREATE : AccessPolicyInteraction.UPDATE;
     let validatedResource = this.checkResourcePermissions(resource, interaction);
+    this.validateBinarySecurityContext(validatedResource);
     const { resourceType, id } = validatedResource;
 
     const preCommitResult = await preCommitValidation(this, validatedResource, 'update');
@@ -767,6 +887,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       preCommitResult.id === validatedResource.id
     ) {
       validatedResource = this.checkResourcePermissions(preCommitResult, interaction);
+      this.validateBinarySecurityContext(validatedResource);
     }
 
     const existing = create ? undefined : await this.checkExistingResource<T>(resourceType, id);
@@ -790,7 +911,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       ...updated.meta,
       versionId: this.generateId(),
       lastUpdated: this.getLastUpdated(existing, validatedResource),
-      author: this.getAuthor(validatedResource),
+      author: this.getAuthor(),
       onBehalfOf: this.context.onBehalfOf,
     };
 
@@ -808,7 +929,24 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     resultMeta.compartment = this.getCompartments(result);
 
     // Validate resource after all modifications and touchups above are done
-    await this.validateResource(result);
+    await validateRepositoryResource(this, result);
+    // If this is a Subscription resource we are creating, we want to make sure the user is not over their per-user limit
+    if (create && result.resourceType === 'Subscription' && result.channel?.type === 'websocket') {
+      const projectId = result.meta?.project;
+      const author = result.meta?.author?.reference;
+      if (!(projectId && author)) {
+        throw new OperationOutcomeError(badRequest('No project or author connected to the specified Subscription.'));
+      }
+      const project = await this.getProjectById(projectId);
+      assert(project);
+      try {
+        await checkWebSocketSubscriptionLimit(project, author);
+      } catch {
+        await cleanupUserSubs(author);
+        await checkWebSocketSubscriptionLimit(project, author);
+      }
+    }
+
     if (this.context.checkReferencesOnWrite) {
       await this.preCommit(async () => {
         await validateResourceReferences(this, result);
@@ -827,10 +965,12 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
     await this.handleStorage(result, create);
     await this.postCommit(async () => this.handleBinaryUpdate(existing, result));
-    await this.postCommit(async () => {
-      const project = await this.getProjectById(projectId);
-      await addBackgroundJobs(result, existing, { project, interaction });
-    });
+    if (!this.context.skipBackgroundJobs) {
+      await this.postCommit(async () => {
+        const project = await this.getProjectById(projectId);
+        await addBackgroundJobs(result, existing, { project, interaction });
+      });
+    }
 
     const output = deepClone(result);
     return this.removeHiddenFields(output);
@@ -864,6 +1004,11 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     // Parse result.data as a base64 string
     const buffer = Buffer.from(resource.data as string, 'base64');
 
+    // base64 data should be limited in size
+    const maxBase64Bytes = getConfig().base64BinaryMaxBytes;
+    if (maxBase64Bytes && buffer.length > maxBase64Bytes) {
+      throw new OperationOutcomeError(badRequest(`base64Binary exceeds ${maxBase64Bytes} bytes`));
+    }
     // Convert buffer to a Readable stream
     const stream = new Readable({
       read() {
@@ -889,207 +1034,27 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     if (!this.isCacheOnly(resource)) {
       await this.writeToDatabase(resource, create);
     }
-    await this.setCacheEntry(resource);
+
+    // Skip writing AuditEvents to cache, since they are written in high volume but are seldom read by ID
+    if (resource.resourceType !== 'AuditEvent') {
+      await this.setCacheEntry(resource);
+    } else if (!create) {
+      // Explicitly remove old AuditEvents from cache on update, to prevent stale reads from cache
+      await this.deleteCacheEntry(resource.resourceType, resource.id);
+    }
 
     // Handle special cases for resource caching
-    if (resource.resourceType === 'Subscription' && resource.channel?.type === 'websocket') {
-      const redis = getRedis();
-      const project = resource?.meta?.project;
-      if (!project) {
-        throw new OperationOutcomeError(serverError(new Error('No project connected to the specified Subscription.')));
-      }
-      // WebSocket Subscriptions are also cache-only, but also need to be added to a special cache key
-      await redis.sadd(`medplum:subscriptions:r4:project:${project}:active`, `Subscription/${resource.id}`);
+    if (resource.resourceType === 'Subscription' && resource.channel?.type === 'websocket' && create) {
+      getLogger().info('[WS] Subscription created', {
+        subscriptionId: resource.id,
+        criteria: resource.criteria,
+        user: resource.meta?.author?.reference,
+      });
     }
+
     if (resource.resourceType === 'StructureDefinition') {
       await removeCachedProfile(resource);
     }
-  }
-
-  /**
-   * Validates a resource against the current project configuration.
-   * If strict mode is enabled (default), validates against base StructureDefinition and all profiles.
-   * If strict mode is disabled, validates against the legacy JSONSchema validator.
-   * Throws on validation errors.
-   * Returns silently on success.
-   * @param resource - The candidate resource to validate.
-   */
-  async validateResource(resource: Resource): Promise<void> {
-    if (this.context.strictMode) {
-      await this.validateResourceStrictly(resource);
-    } else {
-      // Perform loose validation first to detect any severe issues
-      validateResourceWithJsonSchema(resource);
-
-      // Attempt strict validation and log warnings on failure
-      try {
-        await this.validateResourceStrictly(resource);
-      } catch (err: any) {
-        getLogger().warn('Strict validation would fail', {
-          resource: getReferenceString(resource),
-          err,
-        });
-      }
-    }
-  }
-
-  async validateResourceStrictly(resource: Resource): Promise<void> {
-    const logger = getLogger();
-    const start = process.hrtime.bigint();
-
-    // Prepare validator options
-    let options: ValidatorOptions | undefined;
-    if (this.context.validateTerminology) {
-      const tokens = Object.create(null);
-      options = { ...options, collect: { tokens } };
-    }
-
-    // Validate resource against base FHIR spec
-    const issues = validateResource(resource, options);
-    for (const issue of issues) {
-      logger.warn(`Validator warning: ${issue.details?.text}`, { project: this.context.projects?.[0]?.id, issue });
-    }
-
-    // Validate profiles after verifying compliance with base spec
-    const profileUrls = resource.meta?.profile;
-    if (profileUrls) {
-      await this.validateProfiles(resource, profileUrls, options);
-    }
-
-    // (Optionally) check any required terminology bindings found
-    if (this.context.validateTerminology && options?.collect?.tokens) {
-      await this.validateTerminology(options.collect.tokens, issues);
-      if (issues.some((iss) => iss.severity === 'error')) {
-        throw new OperationOutcomeError({ resourceType: 'OperationOutcome', issue: issues });
-      }
-    }
-
-    // Track latency for successful validation
-    const durationMs = Number(process.hrtime.bigint() - start) / 1e6; // Convert nanoseconds to milliseconds
-    recordHistogramValue('medplum.server.validationDurationMs', durationMs, { options: { unit: 'ms' } });
-    if (durationMs > 10) {
-      logger.debug('High validator latency', {
-        resourceType: resource.resourceType,
-        id: resource.id,
-        durationMs,
-      });
-    }
-  }
-
-  private async validateProfiles(resource: Resource, profileUrls: string[], options?: ValidatorOptions): Promise<void> {
-    const logger = getLogger();
-    for (const url of profileUrls) {
-      const loadStart = process.hrtime.bigint();
-      const profile = await this.loadProfile(url);
-      const loadTime = Number(process.hrtime.bigint() - loadStart);
-      if (!profile) {
-        logger.warn('Unknown profile referenced', {
-          resource: `${resource.resourceType}/${resource.id}`,
-          url,
-        });
-        continue;
-      }
-      const validateStart = process.hrtime.bigint();
-      validateResource(resource, { ...options, profile });
-      const validateTime = Number(process.hrtime.bigint() - validateStart);
-      logger.debug('Profile loaded', {
-        url,
-        loadTime,
-        validateTime,
-      });
-    }
-  }
-
-  private async validateTerminology(
-    tokens: Record<string, TypedValueWithPath[]>,
-    issues: OperationOutcomeIssue[]
-  ): Promise<void> {
-    for (const [url, values] of Object.entries(tokens)) {
-      const valueSet = await findTerminologyResource<ValueSet>(this, 'ValueSet', url);
-
-      const resultCache: Record<string, boolean | undefined> = Object.create(null);
-      for (const value of values) {
-        let codings: Coding[] | undefined;
-        switch (value.type) {
-          case 'CodeableConcept':
-            codings = (value.value as CodeableConcept).coding;
-            break;
-          case 'Coding':
-            codings = [value.value as Coding];
-            break;
-          default: {
-            const cachedResult = resultCache[`${value.type}|${value.value}`];
-            if (cachedResult === false) {
-              issues.push({
-                severity: 'error',
-                code: 'value',
-                details: { text: `Value ${JSON.stringify(value.value)} did not satisfy terminology binding ${url}` },
-                expression: [value.path],
-              });
-            }
-            if (cachedResult !== undefined) {
-              continue;
-            }
-            codings = [{ code: value.value as string }];
-            break;
-          }
-        }
-        if (!codings?.length) {
-          continue;
-        }
-
-        const matchedCoding = await validateCodingInValueSet(this, valueSet, codings);
-        resultCache[`${value.type}|${value.value}`] = Boolean(matchedCoding);
-        if (!matchedCoding) {
-          issues.push({
-            severity: 'error',
-            code: 'value',
-            details: { text: `Value ${JSON.stringify(value.value)} did not satisfy terminology binding ${url}` },
-            expression: [value.path],
-          });
-        }
-      }
-    }
-  }
-
-  private async loadProfile(url: string): Promise<StructureDefinition | undefined> {
-    if (this.context.projects?.length) {
-      // Try loading from cache, using all available Project IDs
-      const cacheKeys = this.context.projects.map((p) => getProfileCacheKey(p.id, url));
-      const results = await getRedis().mget(...cacheKeys);
-      const cachedProfile = results.find(Boolean) as string | undefined;
-      if (cachedProfile) {
-        return (JSON.parse(cachedProfile) as CacheEntry<StructureDefinition>).resource;
-      }
-    }
-
-    // Fall back to loading from the DB; descending version sort approximates version resolution for some cases
-    const profile = await this.searchOne<StructureDefinition>({
-      resourceType: 'StructureDefinition',
-      filters: [
-        {
-          code: 'url',
-          operator: Operator.EQUALS,
-          value: url,
-        },
-      ],
-      sortRules: [
-        {
-          code: 'version',
-          descending: true,
-        },
-        {
-          code: 'date',
-          descending: true,
-        },
-      ],
-    });
-
-    if (this.context.projects?.length && profile) {
-      // Store loaded profile in cache
-      await cacheProfile(profile);
-    }
-    return profile;
   }
 
   /**
@@ -1099,10 +1064,10 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param create - If true, then the resource is being created.
    */
   private async writeToDatabase<T extends WithId<Resource>>(resource: T, create: boolean): Promise<void> {
-    await this.ensureInTransaction(async (client) => {
-      await this.writeResource(client, resource);
-      await this.writeResourceVersion(client, resource);
-      await this.writeLookupTables(client, resource, create);
+    await this.ensureInTransaction(async (txRepo) => {
+      await txRepo.writeResource(resource);
+      await txRepo.writeResourceVersion(resource);
+      await txRepo.writeLookupTables(resource, create);
     });
   }
 
@@ -1167,13 +1132,14 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @returns Promise to complete.
    */
   async reindexResource<T extends Resource = Resource>(resourceType: T['resourceType'], id: string): Promise<void> {
+    this.assertUsable();
     if (!this.isSuperAdmin()) {
       throw new OperationOutcomeError(forbidden);
     }
 
-    await this.withTransaction(async (conn) => {
-      const resource = await this.readResourceImpl<T>(resourceType, id);
-      return this.reindexResources(conn, [resource]);
+    await this.withTransaction(async (txRepo) => {
+      const resource = await txRepo.readResourceImpl<T>(resourceType, id);
+      return txRepo.reindexResources([resource]);
     });
   }
 
@@ -1181,10 +1147,10 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * Internal implementation of reindexing a resource.
    * This accepts a resource as a parameter, rather than a resource type and ID.
    * When doing a bulk reindex, this will be more efficient because it avoids unnecessary reads.
-   * @param conn - Database client to use for reindex operations.
    * @param resources - The resource(s) to reindex.
    */
-  async reindexResources<T extends Resource>(conn: PoolClient, resources: WithId<T>[]): Promise<void> {
+  async reindexResources<T extends Resource>(resources: WithId<T>[]): Promise<void> {
+    this.assertUsable();
     if (!this.isSuperAdmin()) {
       throw new OperationOutcomeError(forbidden);
     }
@@ -1202,8 +1168,10 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       }
     }
 
-    await this.batchWriteLookupTables(conn, resources, false);
-    await this.batchWriteResources(conn, resources);
+    await this.ensureInTransaction(async (txRepo) => {
+      await txRepo.batchWriteLookupTables(resources, false);
+      await txRepo.batchWriteResources(resources);
+    });
   }
 
   /**
@@ -1220,6 +1188,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     id: string,
     options?: ResendSubscriptionsOptions
   ): Promise<void> {
+    this.assertUsable();
     if (!this.isSuperAdmin() && !this.isProjectAdmin()) {
       throw new OperationOutcomeError(forbidden);
     }
@@ -1248,11 +1217,13 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   }
 
   async deleteResource<T extends Resource = Resource>(resourceType: T['resourceType'], id: string): Promise<void> {
-    await this.rateLimiter()?.recordWrite();
+    await this.recordFhirQuota(FhirQuotaCost.WRITE);
 
     const startTime = Date.now();
     let resource: WithId<T>;
     try {
+      // ensure existing resource read goes to the writer
+      this.setMode(RepositoryMode.WRITER);
       resource = await this.readResourceImpl<T>(resourceType, id);
     } catch (err) {
       const outcomeErr = err as OperationOutcomeError;
@@ -1271,51 +1242,60 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
       await this.deleteCacheEntry(resourceType, id);
 
+      // Clean up per-user and project active sets for deleted WebSocket subscriptions
+      if (resource.resourceType === 'Subscription' && resource.channel?.type === 'websocket') {
+        const author = resource.meta?.author?.reference;
+        const projectId = resource.meta?.project;
+        const criteriaResourceType = resource.criteria?.split('?')[0];
+        const cleanupPromises: Promise<number>[] = [];
+        if (author) {
+          cleanupPromises.push(removeUserActiveWebSocketSubscriptions(author, [`Subscription/${id}`]));
+        }
+        if (projectId && criteriaResourceType && isResourceType(criteriaResourceType)) {
+          cleanupPromises.push(removeActiveSubscriptions(projectId, criteriaResourceType, [`Subscription/${id}`]));
+        }
+        await Promise.all(cleanupPromises);
+        if (author) {
+          const userSubCount = await getUserActiveWebSocketSubscriptionCount(author);
+          getLogger().info('[WS] Subscription deleted', {
+            subscriptionId: resource.id,
+            user: author,
+            userSubscriptions: userSubCount,
+          });
+        }
+      }
+
       if (!this.isCacheOnly(resource)) {
-        await this.ensureInTransaction(async (conn) => {
-          const lastUpdated = new Date();
-          const content = '';
-          const columns: Record<string, any> = {
-            id,
-            lastUpdated,
-            deleted: true,
-            projectId: resource.meta?.project ?? systemResourceProjectId,
-            content,
-            __version: -1,
-          };
+        await this.ensureInTransaction(async (txRepo) => {
+          const columns = buildDeletedResourceRow(resourceType, id, resource.meta?.project);
 
-          if (resourceType !== 'Binary') {
-            columns['compartments'] = this.getCompartments(resource).map((ref) => resolveId(ref));
-          }
-
-          for (const searchParam of getStandardAndDerivedSearchParameters(resourceType)) {
-            this.buildColumn({ resourceType } as Resource, columns, searchParam);
-          }
-
-          await new InsertQuery(resourceType, [columns]).mergeOnConflict().execute(conn);
+          const client = txRepo.getDatabaseClient(DatabaseMode.WRITER);
+          await new InsertQuery(resourceType, [columns]).mergeOnConflict().execute(client);
 
           await new InsertQuery(resourceType + '_History', [
             {
               id,
-              versionId: this.generateId(),
-              lastUpdated,
-              content,
+              versionId: txRepo.generateId(),
+              lastUpdated: columns.lastUpdated,
+              content: columns.content,
             },
-          ]).execute(conn);
+          ]).execute(client);
 
-          await this.deleteFromLookupTables(conn, resource);
+          await txRepo.deleteFromLookupTables(client, resource);
           const durationMs = Date.now() - startTime;
 
-          await this.postCommit(async () => {
-            this.logEvent(DeleteInteraction, AuditEventOutcome.Success, undefined, { resource, durationMs });
+          await txRepo.postCommit(async () => {
+            txRepo.logEvent(DeleteInteraction, AuditEventOutcome.Success, undefined, { resource, durationMs });
           });
         });
       }
 
-      await addSubscriptionJobs(resource, resource, {
-        project: await this.getProjectById(resource.meta?.project),
-        interaction: 'delete',
-      });
+      if (!this.context.skipBackgroundJobs) {
+        await addBackgroundJobs(resource, resource, {
+          project: await this.getProjectById(resource.meta?.project),
+          interaction: 'delete',
+        });
+      }
     } catch (err) {
       const durationMs = Date.now() - startTime;
       this.logEvent(DeleteInteraction, AuditEventOutcome.MinorFailure, err, {
@@ -1329,15 +1309,15 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   async patchResource<T extends Resource>(
     resourceType: T['resourceType'],
     id: string,
-    patch: Operation[],
+    patch: Operation[] | Parameters,
     options?: UpdateResourceOptions
   ): Promise<WithId<T>> {
-    await this.rateLimiter()?.recordWrite();
+    await this.recordFhirQuota(FhirQuotaCost.WRITE);
 
     const startTime = Date.now();
     try {
-      return await this.ensureInTransaction(async () => {
-        const resource = await this.readResourceFromDatabase<T>(resourceType, id);
+      return await this.ensureInTransaction(async (txRepo) => {
+        const resource = await txRepo.readResourceFromDatabase<T>(resourceType, id);
 
         if (resource.resourceType !== resourceType) {
           throw new OperationOutcomeError(badRequest('Incorrect resource type'));
@@ -1346,13 +1326,23 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
           throw new OperationOutcomeError(badRequest('Incorrect ID'));
         }
 
-        patchObject(resource, patch);
+        if (Array.isArray(patch)) {
+          patchObject(resource, patch);
+        } else if (patch.parameter) {
+          const params = parseParametersFromDefinitions(
+            patchOperationDefinition.parameter as OperationDefinitionParameter[],
+            patch.parameter
+          );
+          fhirpathPatchTypedValue(toTypedValue(resource), params.operation as FhirPathPatch[]);
+        } else {
+          return resource; // No patch present, return unmodified
+        }
 
-        const result = await this.updateResourceImpl(resource, false, options);
+        const result = await txRepo.updateResourceImpl(resource, false, options);
         const durationMs = Date.now() - startTime;
 
-        await this.postCommit(async () => {
-          this.logEvent(PatchInteraction, AuditEventOutcome.Success, undefined, { resource: result, durationMs });
+        await txRepo.postCommit(async () => {
+          txRepo.logEvent(PatchInteraction, AuditEventOutcome.Success, undefined, { resource: result, durationMs });
         });
         return result;
       });
@@ -1373,6 +1363,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param id - The resource ID.
    */
   async expungeResource(resourceType: string, id: string): Promise<void> {
+    this.assertUsable();
     await this.expungeResources(resourceType, [id]);
   }
 
@@ -1383,28 +1374,49 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param ids - The resource IDs.
    */
   async expungeResources(resourceType: string, ids: string[]): Promise<void> {
+    this.assertUsable();
     if (!this.isSuperAdmin() && !this.isProjectAdmin()) {
       throw new OperationOutcomeError(forbidden);
     }
     if (ids.length === 0) {
       return;
     }
-    await this.withTransaction(async (client) => {
-      for (const id of ids) {
-        await this.deleteFromLookupTables(client, { resourceType, id } as Resource);
-      }
+    if (ids.length > 10000) {
+      throw new OperationOutcomeError(badRequest('Expunge request contains too many IDs'));
+    }
 
-      const db = this.getDatabaseClient(DatabaseMode.WRITER);
-      await new DeleteQuery(resourceType).where('id', 'IN', ids).execute(db);
-      await new DeleteQuery(resourceType + '_History').where('id', 'IN', ids).execute(db);
-      await this.postCommit(() => this.deleteCacheEntries(resourceType, ids));
-    });
+    const projectId = this.isSuperAdmin() ? undefined : this.context.currentProject?.id;
+    const deletedIds = await this.withTransaction<string[]>(
+      async (txRepo) => {
+        const deleteQuery = new DeleteQuery(resourceType).where('id', 'IN', ids).returning('id');
+        if (projectId) {
+          deleteQuery.where('projectId', '=', projectId);
+        }
+        const client = txRepo.getDatabaseClient(DatabaseMode.WRITER);
+        const deleteResult = await deleteQuery.execute<{ id: string }>(client);
+        if (deleteResult.length === 0) {
+          return [];
+        }
+
+        const deletedIds = new Array<string>(deleteResult.length);
+        for (let i = 0; i < deleteResult.length; i++) {
+          const res = deleteResult[i];
+          deletedIds[i] = res.id;
+          await txRepo.deleteFromLookupTables(client, { resourceType, id: res.id } as WithId<Resource>);
+        }
+
+        await new DeleteQuery(resourceType + '_History').where('id', 'IN', deletedIds).execute(client);
+        await txRepo.postCommit(() => txRepo.deleteCacheEntries(resourceType, deletedIds));
+        return deletedIds;
+      },
+      { serializable: true }
+    );
     incrementCounter(
       `medplum.fhir.interaction.delete.count`,
       { attributes: { resourceType, result: 'success' } },
-      ids.length
+      deletedIds.length
     );
-    await this.resourceCap()?.deleted(ids.length);
+    await this.resourceCap()?.deleted(deletedIds.length);
   }
 
   /**
@@ -1414,6 +1426,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param before - The date before which resources should be purged.
    */
   async purgeResources(resourceType: ResourceType, before: string): Promise<void> {
+    this.assertUsable();
     if (!this.isSuperAdmin()) {
       throw new OperationOutcomeError(forbidden);
     }
@@ -1434,7 +1447,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     searchRequest: SearchRequest<T>,
     options?: SearchOptions
   ): Promise<Bundle<WithId<T>>> {
-    await this.rateLimiter()?.recordSearch();
+    await this.recordFhirQuota(FhirQuotaCost.SEARCH);
 
     const startTime = Date.now();
     try {
@@ -1455,6 +1468,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     process: (resource: WithId<T>) => Promise<void>,
     options?: ProcessAllResourcesOptions
   ): Promise<void> {
+    this.assertUsable();
     let searchRequest: SearchRequest<T> | undefined = initialSearchRequest;
     while (searchRequest) {
       const bundle: Bundle<T> = await this.search<T>(searchRequest);
@@ -1483,7 +1497,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     referenceField: string,
     references: string[]
   ): Promise<Record<string, WithId<T>[]>> {
-    await this.rateLimiter()?.recordSearch(references.length);
+    await this.recordFhirQuota(references.length * FhirQuotaCost.SEARCH);
     const startTime = Date.now();
     try {
       const result = await searchByReferenceImpl(this, searchRequest, referenceField, references);
@@ -1519,13 +1533,46 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * Adds security filters to the select query.
    * @param builder - The select query builder.
    * @param resourceType - The resource type for compartments.
+   * @param interaction - The FHIR interaction being performed.
    */
-  addSecurityFilters(builder: SelectQuery, resourceType: string): void {
+  addSecurityFilters(builder: SelectQuery, resourceType: string, interaction: AccessPolicyInteraction): void {
     // No compartment restrictions for admins.
     if (!this.isSuperAdmin()) {
       this.addProjectFilters(builder, resourceType);
     }
-    this.addAccessPolicyFilters(builder, resourceType);
+    this.addAccessPolicyFilters(builder, resourceType, interaction);
+  }
+
+  /**
+   * Returns the permitted project IDs the Repository is allowed to access for the given resource type.
+   * @param resourceType - The resource type.
+   * @returns The permitted project IDs or undefined if all projects are permitted
+   */
+  private getPermittedProjectIds(resourceType: string): string[] | undefined {
+    if (!this.context.projects?.length) {
+      // The repository is system-level, so all projects are permitted.
+      return undefined;
+    }
+
+    const projectIds = [this.context.projects[0].id]; // Always include the first project
+
+    if (resourceType !== 'Project' && projectAdminResourceTypes.includes(resourceType)) {
+      // If the resource type is a project admin resource, only include the current project (the first project)
+      return projectIds;
+    }
+
+    for (let i = 1; i < this.context.projects.length; i++) {
+      const project = this.context.projects[i];
+      if (
+        resourceType === 'Project' || // When searching for projects, include all projects
+        project.id === this.context.currentProject?.id || // Always include the current project (usually the same as the first project)
+        !project.exportedResourceType?.length || // Include projects that do not specify exported resource types
+        project.exportedResourceType?.includes(resourceType as ResourceType) // Include projects that export resourceType
+      ) {
+        projectIds.push(project.id);
+      }
+    }
+    return projectIds;
   }
 
   /**
@@ -1534,19 +1581,8 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param resourceType - The resource type being searched.
    */
   private addProjectFilters(builder: SelectQuery, resourceType: string): void {
-    if (this.context.projects?.length) {
-      const projectIds = [this.context.projects[0].id]; // Always include the first project
-      for (let i = 1; i < this.context.projects.length; i++) {
-        const project = this.context.projects[i];
-        if (
-          resourceType === 'Project' || // When searching for projects, include all projects
-          project.id === this.context.currentProject?.id || // Always include the current project (usually the same as the first project)
-          !project.exportedResourceType?.length || // Include projects that do not specify exported resource types
-          project.exportedResourceType?.includes(resourceType as ResourceType) // Include projects that export resourceType
-        ) {
-          projectIds.push(project.id);
-        }
-      }
+    const projectIds = this.getPermittedProjectIds(resourceType);
+    if (projectIds) {
       builder.where('projectId', 'IN', projectIds);
     }
   }
@@ -1554,9 +1590,14 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   /**
    * Adds access policy filters to the select query.
    * @param builder - The select query builder.
-   * @param resourceType - The resource type being searched.
+   * @param resourceType - The resource type being read or searched.
+   * @param interaction - The FHIR interaction being performed.
    */
-  private addAccessPolicyFilters(builder: SelectQuery, resourceType: string): void {
+  private addAccessPolicyFilters(
+    builder: SelectQuery,
+    resourceType: string,
+    interaction: AccessPolicyInteraction
+  ): void {
     const accessPolicy = this.context.accessPolicy;
     if (!accessPolicy?.resource) {
       return;
@@ -1569,8 +1610,13 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
     const expressions: Expression[] = [];
 
+    const isProjectAdminResource = projectAdminResourceTypes.includes(resourceType);
+
     for (const policy of accessPolicy.resource) {
-      if (policy.resourceType === resourceType || policy.resourceType === '*') {
+      if (
+        (policy.resourceType === resourceType || (policy.resourceType === '*' && !isProjectAdminResource)) &&
+        (!policy.interaction || policy.interaction.includes(interaction))
+      ) {
         const policyCompartmentId = resolveId(policy.compartment);
         if (policyCompartmentId) {
           // Deprecated - to be removed
@@ -1616,65 +1662,26 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     }
   }
 
-  private buildResourceRow(resource: Resource): Record<string, any> {
-    const resourceType = resource.resourceType;
-    const meta = resource.meta as Meta;
-    const content = stringify(resource);
-
-    const row: Record<string, any> = {
-      id: resource.id,
-      lastUpdated: meta.lastUpdated,
-      deleted: false,
-      projectId: meta.project ?? systemResourceProjectId,
-      content,
-      __version: Repository.VERSION,
-    };
-
-    const searchParams = getStandardAndDerivedSearchParameters(resourceType);
-    if (searchParams.length > 0) {
-      const startTime = process.hrtime.bigint();
-      try {
-        for (const searchParam of searchParams) {
-          this.buildColumn(resource, row, searchParam);
-        }
-      } catch (err) {
-        getLogger().error('Error building row for resource', {
-          resource: `${resourceType}/${resource.id}`,
-          err,
-        });
-        throw err;
-      }
-      recordHistogramValue(
-        'medplum.server.indexingDurationMs',
-        Number(process.hrtime.bigint() - startTime) / 1e6, // High resolution time, converted from ns to ms
-        {
-          options: { unit: 'ms' },
-        }
-      );
-    }
-
-    return row;
-  }
-
   /**
    * Writes the resource to the resource table.
    * This builds all search parameter columns.
    * This does *not* write the version to the history table.
-   * @param client - The database client inside the transaction.
    * @param resource - The resource.
    */
-  private async writeResource(client: PoolClient, resource: Resource): Promise<void> {
-    await new InsertQuery(resource.resourceType, [this.buildResourceRow(resource)]).mergeOnConflict().execute(client);
+  protected async writeResource(resource: Resource): Promise<void> {
+    const client = this.getDatabaseClient(DatabaseMode.WRITER);
+    const row = buildResourceRow(resource, Repository.VERSION);
+    await new InsertQuery(resource.resourceType, [row]).mergeOnConflict().execute(client);
   }
 
-  private async batchWriteResources(client: PoolClient, resources: Resource[]): Promise<void> {
+  protected async batchWriteResources(resources: Resource[]): Promise<void> {
     if (!resources.length) {
       return;
     }
-
+    const client = this.getDatabaseClient(DatabaseMode.WRITER);
     await new InsertQuery(
       resources[0].resourceType,
-      resources.map((r) => this.buildResourceRow(r))
+      resources.map((r) => buildResourceRow(r, Repository.VERSION))
     )
       .mergeOnConflict()
       .execute(client);
@@ -1682,14 +1689,14 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
   /**
    * Writes a version of the resource to the resource history table.
-   * @param client - The database client inside the transaction.
    * @param resource - The resource.
    */
-  private async writeResourceVersion(client: PoolClient, resource: Resource): Promise<void> {
+  protected async writeResourceVersion(resource: Resource): Promise<void> {
     const resourceType = resource.resourceType;
     const meta = resource.meta as Meta;
     const content = stringify(resource);
 
+    const client = this.getDatabaseClient(DatabaseMode.WRITER);
     await new InsertQuery(resourceType + '_History', [
       {
         id: resource.id,
@@ -1750,162 +1757,24 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     return results;
   }
 
-  /**
-   * Builds the columns to write for a given resource and search parameter.
-   * If nothing to write, then no columns will be added.
-   * Some search parameters can result in multiple columns (for example, Reference objects).
-   * @param resource - The resource to write.
-   * @param columns - The output columns to write.
-   * @param searchParam - The search parameter definition.
-   */
-  private buildColumn(resource: Resource, columns: Record<string, any>, searchParam: SearchParameter): void {
-    if (
-      searchParam.code === '_id' ||
-      searchParam.code === '_lastUpdated' ||
-      searchParam.code === '_compartment:identifier' ||
-      searchParam.code === '_deleted' ||
-      searchParam.type === 'composite'
-    ) {
-      return;
-    }
-
-    if (searchParam.code === '_compartment') {
-      columns['compartments'] = resource.meta?.compartment?.map((ref) => resolveId(ref)) ?? [];
-      return;
-    }
-
-    const impl = getSearchParameterImplementation(resource.resourceType, searchParam);
-    if (impl.searchStrategy === 'lookup-table') {
-      if (impl.sortColumnName) {
-        columns[impl.sortColumnName] = getHumanNameSortValue((resource as HumanNameResource).name, searchParam);
-      }
-      return;
-    }
-
-    const typedValues = evalFhirPathTyped(impl.parsedExpression, [toTypedValue(resource)]);
-
-    // Handle special case for "MeasureReport-period"
-    // This is a trial for using "tstzrange" columns for date/time ranges.
-    // Eventually, this special case will go away, and this will become the default behavior for all "date" search parameters.
-    if (searchParam.id === 'MeasureReport-period') {
-      columns['period_range'] = this.buildPeriodColumn(typedValues[0]?.value);
-    }
-
-    if (impl.searchStrategy === 'token-column') {
-      buildTokenColumns(searchParam, impl, columns, resource, {
-        paddingConfig: getArrayPaddingConfig(searchParam, resource.resourceType),
-      });
-      return;
-    }
-
-    impl satisfies ColumnSearchParameterImplementation;
-    const columnValues = this.buildColumnValues(searchParam, impl, typedValues);
-    if (impl.array) {
-      columns[impl.columnName] = columnValues.length > 0 ? columnValues : undefined;
-    } else {
-      columns[impl.columnName] = columnValues[0];
-    }
-  }
-
-  /**
-   * Builds a single value for a given search parameter.
-   * If the search parameter is an array, then this method will be called for each element.
-   * If the search parameter is not an array, then this method will be called for the value.
-   * @param searchParam - The search parameter definition.
-   * @param details - The extra search parameter details.
-   * @param typedValues - The FHIR resource value.
-   * @returns The column value.
-   */
-  private buildColumnValues(
-    searchParam: SearchParameter,
-    details: SearchParameterDetails,
-    typedValues: TypedValue[]
-  ): (boolean | number | string | undefined | null)[] {
-    if (details.type === SearchParameterType.BOOLEAN) {
-      const value = typedValues[0]?.value;
-      if (value === undefined || value === null) {
-        return [null];
-      }
-      return [value === true || value === 'true'];
-    }
-
-    if (details.type === SearchParameterType.DATE) {
-      // "Date" column is a special case that only applies when the following conditions are true:
-      // 1. The search parameter is a date type.
-      // 2. The underlying FHIR ElementDefinition referred to by the search parameter has a type of "date".
-      return flatMapFilter(convertToSearchableDates(typedValues), (p) => (p.start ?? p.end)?.substring(0, 10));
-    }
-
-    if (details.type === SearchParameterType.DATETIME) {
-      // Future work: write the whole period to the DB after migrating all "date" search parameters to use a tstzrange.
-      return flatMapFilter(convertToSearchableDates(typedValues), (p) => p.start ?? p.end);
-    }
-
-    if (searchParam.type === 'number') {
-      // Future work: write the whole range to the DB after migrating all "number" search parameters to use a range.
-      return flatMapFilter(convertToSearchableNumbers(typedValues), ([low, high]) => low ?? high);
-    }
-
-    if (searchParam.type === 'quantity') {
-      // Future work: write the whole range to the DB after migrating all "quantity" search parameters to use a range.
-      return flatMapFilter(convertToSearchableQuantities(typedValues), (q) => q.value);
-    }
-
-    if (searchParam.type === 'reference') {
-      return flatMapFilter(convertToSearchableReferences(typedValues), truncateTextColumn);
-    }
-
-    if (searchParam.type === 'token') {
-      return flatMapFilter(convertToSearchableTokens(typedValues), (t) => truncateTextColumn(t.value));
-    }
-
-    if (searchParam.type === 'string') {
-      return flatMapFilter(convertToSearchableStrings(typedValues), truncateTextColumn);
-    }
-
-    if (searchParam.type === 'uri') {
-      return flatMapFilter(convertToSearchableUris(typedValues), truncateTextColumn);
-    }
-
-    if (searchParam.type === 'special' || searchParam.type === 'composite') {
-      // Special and composite search parameters are not supported in the database.
-      return [];
-    }
-
-    throw new Error('Unrecognized search parameter type: ' + searchParam.type);
-  }
-
-  /**
-   * Builds the column value for a "date" search parameter.
-   * This is currently in trial mode. The intention is for this to replace all "date" and "date/time" search parameters.
-   * @param value - The FHIRPath result value.
-   * @returns The period column string value.
-   */
-  private buildPeriodColumn(value: any): string | undefined {
-    const period = toPeriod(value);
-    if (period) {
-      return periodToRangeString(period);
-    }
-    return undefined;
+  supportsRangeSearch(): boolean {
+    return Boolean(getConfig().rangeSearch || this.context.currentProject?.features?.includes('range-search'));
   }
 
   /**
    * Writes resources values to the lookup tables.
-   * @param client - The database client inside the transaction.
    * @param resource - The resource to index.
    * @param create - If true, then the resource is being created.
    */
-  private async writeLookupTables(client: PoolClient, resource: WithId<Resource>, create: boolean): Promise<void> {
+  protected async writeLookupTables(resource: WithId<Resource>, create: boolean): Promise<void> {
+    const client = this.getDatabaseClient(DatabaseMode.WRITER);
     for (const lookupTable of lookupTables) {
       await lookupTable.indexResource(client, resource, create);
     }
   }
 
-  private async batchWriteLookupTables<T extends Resource>(
-    client: PoolClient,
-    resources: WithId<T>[],
-    create: boolean
-  ): Promise<void> {
+  protected async batchWriteLookupTables<T extends Resource>(resources: WithId<T>[], create: boolean): Promise<void> {
+    const client = this.getDatabaseClient(DatabaseMode.WRITER);
     for (const lookupTable of lookupTables) {
       await lookupTable.batchIndexResources(client, resources, create);
     }
@@ -1916,7 +1785,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    * @param client - The database client inside the transaction.
    * @param resource - The resource to delete.
    */
-  private async deleteFromLookupTables(client: Pool | PoolClient, resource: Resource): Promise<void> {
+  protected async deleteFromLookupTables(client: PgQueryable, resource: WithId<Resource>): Promise<void> {
     for (const lookupTable of lookupTables) {
       await lookupTable.deleteValuesForResource(client, resource);
     }
@@ -1985,23 +1854,11 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
   }
 
   /**
-   * Returns the author reference.
-   * If the current context is allowed to write meta,
-   * and the provided resource includes an author reference,
-   * then use the provided value.
-   * Otherwise uses the current context profile.
-   * @param resource - The FHIR resource.
+   * Returns the author reference from the repository context.
+   * meta.author is server-controlled and is never taken from the request body.
    * @returns The author value.
    */
-  getAuthor(resource?: Resource): Reference {
-    // If the resource has an author (whether provided or from existing),
-    // and the current context is allowed to write meta,
-    // then use the provided value.
-    const author = resource?.meta?.author;
-    if (author && this.canWriteProtectedMeta()) {
-      return author;
-    }
-
+  getAuthor(): Reference {
     return this.context.author;
   }
 
@@ -2035,13 +1892,11 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       // When examining a Patient resource, we only look at the individual patient
       // We should not call `getPatients` and `readReference`
       const existingAccounts = extractAccountReferences(existing?.meta);
-      if (existingAccounts?.length) {
-        for (const account of existingAccounts) {
-          accounts.add(account.reference as string);
-        }
+      for (const account of existingAccounts ?? EMPTY) {
+        accounts.add(account.reference as string);
       }
     } else {
-      const systemRepo = getSystemRepo(this.conn); // Re-use DB connection to preserve transaction state
+      const systemRepo = this.getSystemRepo();
       const patients = await systemRepo.readReferences(getPatients(updated));
       for (const patient of patients) {
         if (patient instanceof Error) {
@@ -2051,23 +1906,17 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
         // If the patient has an account, then use it as the resource account.
         const patientAccounts = extractAccountReferences(patient.meta);
-        if (patientAccounts?.length) {
-          for (const account of patientAccounts) {
-            if (account.reference) {
-              accounts.add(account.reference);
-            }
+        for (const account of patientAccounts ?? EMPTY) {
+          if (account.reference) {
+            accounts.add(account.reference);
           }
         }
       }
     }
 
-    if (accounts.size < 1) {
-      return undefined;
-    }
-
-    const result: Reference[] = [];
+    let result: Reference[] | undefined;
     for (const reference of accounts) {
-      result.push({ reference });
+      result = append(result, { reference });
     }
     return result;
   }
@@ -2083,7 +1932,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
 
   /**
    * Determines if the current user can manually set certain protected meta fields
-   * such as author, project, lastUpdated, etc.
+   * such as project, lastUpdated, etc.
    * @returns True if the current user can manually set protected meta fields.
    */
   private canWriteProtectedMeta(): boolean {
@@ -2126,7 +1975,13 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       }
       // Non-Superusers can only access resources in their Project, with read-only access to linked Projects
       if (readInteractions.includes(interaction)) {
-        if (!this.context.projects?.some((p) => p.id === resource.meta?.project)) {
+        const resourceProjectId = resource.meta?.project;
+        if (!resourceProjectId) {
+          return undefined;
+        }
+
+        const permittedProjectIds = this.getPermittedProjectIds(resource.resourceType);
+        if (permittedProjectIds && !permittedProjectIds.includes(resourceProjectId)) {
           return undefined;
         }
       } else if (resource.meta?.project !== this.context.projects?.[0]?.id) {
@@ -2193,16 +2048,15 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    */
   removeHiddenFields<T extends Resource>(input: T): T {
     const policy = satisfiedAccessPolicy(input, AccessPolicyInteraction.READ, this.context.accessPolicy);
-    if (policy?.hiddenFields) {
-      for (const field of policy.hiddenFields) {
-        this.removeField(input, field);
-      }
+    for (const field of policy?.hiddenFields ?? EMPTY) {
+      removeField(input, field);
     }
     if (!this.context.extendedMode && input.meta) {
-      const meta = input.meta as Meta;
+      const meta = input.meta;
       meta.author = undefined;
       meta.project = undefined;
       meta.account = undefined;
+      meta.accounts = undefined;
       meta.compartment = undefined;
     }
     return input;
@@ -2233,7 +2087,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       fieldsToRestore.push(...policy.hiddenFields);
     }
     for (const field of fieldsToRestore) {
-      this.removeField(input, field);
+      removeField(input, field);
       // only top-level fields can be restored.
       // choice-of-type fields technically aren't allowed in readonlyFields/hiddenFields,
       // but that isn't currently enforced at write time, so exclude them here
@@ -2245,43 +2099,6 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       }
     }
     return input;
-  }
-
-  /**
-   * Removes a field from the input resource; supports nested fields.
-   * @param input - The input resource.
-   * @param path - The path to the field to remove
-   */
-  private removeField<T extends Resource>(input: T, path: string): void {
-    let last: any[] = [input];
-    const pathParts = path.split('.');
-    for (let i = 0; i < pathParts.length; i++) {
-      const pathPart = pathParts[i];
-
-      if (i === pathParts.length - 1) {
-        // final key part
-        last.forEach((item) => {
-          resolveFieldName(item, pathPart).forEach((k) => {
-            delete item[k];
-          });
-        });
-      } else {
-        // intermediate key part
-        const next: any[] = [];
-        for (const lastItem of last) {
-          for (const k of resolveFieldName(lastItem, pathPart)) {
-            if (lastItem[k] !== undefined) {
-              if (Array.isArray(lastItem[k])) {
-                next.push(...lastItem[k]);
-              } else if (isObject(lastItem[k])) {
-                next.push(lastItem[k]);
-              }
-            }
-          }
-        }
-        last = next;
-      }
-    }
   }
 
   isSuperAdmin(): boolean {
@@ -2312,7 +2129,27 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       durationMs?: number;
     }
   ): void {
-    if (this.context.author.reference === 'system') {
+    const resource = options?.resource;
+    const isSystem = this.context.author.reference === 'system';
+
+    if (options?.durationMs !== undefined && outcome === AuditEventOutcome.Success) {
+      const duration = options.durationMs / 1000; // Report duration in whole seconds
+      recordHistogramValue('medplum.fhir.interaction.' + subtype.code, duration, {
+        attributes: {
+          system: isSystem,
+          resourceType: isResource(resource) ? resource?.resourceType : undefined,
+        },
+      });
+    }
+    incrementCounter(`medplum.fhir.interaction.${subtype.code}.count`, {
+      attributes: {
+        system: isSystem,
+        resourceType: isResource(resource) ? resource?.resourceType : undefined,
+        result: outcome === AuditEventOutcome.Success ? 'success' : 'failure',
+      },
+    });
+
+    if (isSystem) {
       // Don't log system events.
       return;
     }
@@ -2324,7 +2161,6 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     if (options?.searchRequest) {
       query = options.searchRequest.resourceType + formatSearchQuery(options.searchRequest);
     }
-    const resource = options?.resource;
 
     const auditEvent = createAuditEvent(
       RestfulOperationType,
@@ -2338,275 +2174,68 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
         resource,
         searchQuery: query,
         durationMs: options?.durationMs,
+        client: this.context.client,
       }
     );
     logAuditEvent(auditEvent);
 
-    if (options?.durationMs !== undefined && outcome === AuditEventOutcome.Success) {
-      const duration = options.durationMs / 1000; // Report duration in whole seconds
-      recordHistogramValue('medplum.fhir.interaction.' + subtype.code, duration, {
-        attributes: {
-          resourceType: isResource(resource) ? resource?.resourceType : undefined,
-        },
-      });
-    }
-    incrementCounter(`medplum.fhir.interaction.${subtype.code}.count`, {
-      attributes: {
-        resourceType: isResource(resource) ? resource?.resourceType : undefined,
-        result: outcome === AuditEventOutcome.Success ? 'success' : 'failure',
-      },
-    });
-
     if (getConfig().saveAuditEvents && isResource(resource) && resource?.resourceType !== 'AuditEvent') {
       auditEvent.id = this.generateId();
-      this.updateResourceImpl(auditEvent, true).catch(console.error);
+      this.updateResourceImpl(auditEvent, true).catch((err) => getLogger().error('Failed to save AuditEvent', err));
     }
   }
 
   /**
-   * Returns a database client.
+   * Returns a query-capable database client.
    * Use this method when you don't care if you're in a transaction or not.
    * For example, use this method for "read by ID".
-   * The return value can either be a pool client or a pool.
-   * If in a transaction, then returns the transaction client (PoolClient).
-   * Otherwise, returns the pool (Pool).
+   * At runtime, this can be backed by a pool client or a pool, but the public type
+   * intentionally only exposes query operations.
    * @param mode - The database mode.
    * @returns The database client.
    */
-  getDatabaseClient(mode: DatabaseMode): Pool | PoolClient {
-    this.assertNotClosed();
-    if (this.conn) {
-      // If in a transaction, then use the transaction client.
-      return this.conn;
-    }
-    if (mode === DatabaseMode.WRITER) {
-      // If we ever use a writer, then all subsequent operations must use a writer.
-      this.mode = RepositoryMode.WRITER;
-    }
-    return getDatabasePool(this.mode === RepositoryMode.WRITER ? DatabaseMode.WRITER : mode);
-  }
-
-  /**
-   * Returns a proper database connection.
-   * Unlike getDatabaseClient(), this method always returns a PoolClient.
-   * @param mode - The database mode.
-   * @returns Database connection.
-   */
-  private async getConnection(mode: DatabaseMode): Promise<PoolClient> {
-    this.assertNotClosed();
-    if (!this.conn) {
-      this.conn = await getDatabasePool(mode).connect();
-    }
-    return this.conn;
-  }
-
-  /**
-   * Releases the database connection.
-   * Include an error to remove the connection from the pool.
-   * See: https://github.com/brianc/node-postgres/blob/master/packages/pg-pool/index.js#L333
-   * @param err - Optional error to remove the connection from the pool.
-   */
-  private releaseConnection(err?: boolean | Error): void {
-    if (this.conn && this.disposable) {
-      this.conn.release(err);
-      this.conn = undefined;
-    }
+  getDatabaseClient(mode: DatabaseMode): PgQueryable {
+    this.assertUsable();
+    return this.connection.getDatabaseClient(this.connectionScope, mode);
   }
 
   async withTransaction<TResult>(
-    callback: (client: PoolClient) => Promise<TResult>,
-    options?: { serializable: boolean }
+    callback: (repo: this) => Promise<TResult>,
+    options?: { serializable?: boolean }
   ): Promise<TResult> {
-    const config = getConfig();
-    const transactionAttempts = config.transactionAttempts ?? defaultTransactionAttempts;
-    let error: OperationOutcomeError | undefined;
-    for (let attempt = 0; attempt < transactionAttempts; attempt++) {
-      const attemptStartTime = Date.now();
-      try {
-        const client = await this.beginTransaction(options?.serializable ? 'SERIALIZABLE' : undefined);
-        const result = await callback(client);
-        await this.commitTransaction();
-        if (attempt > 0) {
-          getLogger().info('Completed transaction', {
-            attempt,
-            attemptDurationMs: Date.now() - attemptStartTime,
-            transactionAttempts,
-            serializable: options?.serializable ?? false,
-          });
-        }
-        return result;
-      } catch (err) {
-        const operationOutcomeError = normalizeDatabaseError(err);
-        // Assigning here and throwing below is necessary to satisfy TypeScript
-        error = operationOutcomeError;
-
-        // Ensure transaction is rolled back before attempting any retry
-        await this.rollbackTransaction(operationOutcomeError);
-        if (!this.isRetryableTransactionError(operationOutcomeError)) {
-          break; // Fall through to throw statement outside of the loop
-        }
-      } finally {
-        this.endTransaction();
-      }
-
-      const attemptDurationMs = Date.now() - attemptStartTime;
-
-      if (attempt + 1 < transactionAttempts) {
-        const baseDelayMs = config.transactionExpBackoffBaseDelayMs ?? defaultExpBackoffBaseDelayMs;
-        // Attempts are 0-indexed, so first wait after first attempt will be somewhere between 75% and 125% of baseDelayMs
-        // This calculation results in something like this for the default values:
-        // Between attempt 0 and 1: 50 * (2^0) = 50 * [0.75, 1.25] = **[37.5, 63.5] ms**
-        // Between attempt 1 and 2: 50 * (2^1) = 100 * [0.75, 1.25] = **[75, 125] ms**
-        // etc...
-        const delayMs = Math.ceil(baseDelayMs * 2 ** attempt * (0.75 + Math.random() * 0.5));
-        getLogger().info('Retrying transaction', {
-          attempt,
-          attemptDurationMs,
-          transactionAttempts,
-          serializable: options?.serializable ?? false,
-          delayMs,
-          baseDelayMs,
-        });
-        await sleep(delayMs);
-      } else {
-        getLogger().info('Transaction failed final attempt', {
-          attempt,
-          attemptDurationMs,
-          transactionAttempts,
-          serializable: options?.serializable ?? false,
-        });
-      }
-    }
-
-    // Cannot be undefined: either the function returns normally from the `try` block,
-    // or `error` is assigned at top of `catch` block before reaching this line
-    throw error;
-  }
-
-  private async beginTransaction(isolationLevel: TransactionIsolationLevel = 'REPEATABLE READ'): Promise<PoolClient> {
-    this.assertNotClosed();
-    this.transactionDepth++;
-    const conn = await this.getConnection(DatabaseMode.WRITER);
-    if (this.transactionDepth === 1) {
-      await conn.query('BEGIN ISOLATION LEVEL ' + isolationLevel);
-    } else {
-      await conn.query('SAVEPOINT sp' + this.transactionDepth);
-    }
-    return conn;
-  }
-
-  private async commitTransaction(): Promise<void> {
-    this.assertInTransaction();
-    const conn = await this.getConnection(DatabaseMode.WRITER);
-    if (this.transactionDepth === 1) {
-      await this.processPreCommit();
-      await conn.query('COMMIT');
-      this.transactionDepth--;
-      this.releaseConnection();
-      await this.processPostCommit();
-    } else {
-      await conn.query('RELEASE SAVEPOINT sp' + this.transactionDepth);
-      this.transactionDepth--;
-    }
-  }
-
-  private async rollbackTransaction(error: Error): Promise<void> {
-    this.assertInTransaction();
-    const conn = await this.getConnection(DatabaseMode.WRITER);
-    if (this.transactionDepth === 1) {
-      await conn.query('ROLLBACK');
-      this.transactionDepth--;
-      this.releaseConnection(error);
-    } else {
-      await conn.query('ROLLBACK TO SAVEPOINT sp' + this.transactionDepth);
-      this.transactionDepth--;
-    }
-  }
-
-  private endTransaction(): void {
-    if (this.transactionDepth === 0) {
-      this.releaseConnection();
-    }
-  }
-
-  private assertInTransaction(): void {
-    if (this.transactionDepth <= 0) {
-      throw new Error('Not in transaction');
-    }
-  }
-
-  async preCommit(fn: () => Promise<void>): Promise<void> {
-    if (this.transactionDepth) {
-      this.preCommitCallbacks.push(fn);
-    } else {
-      // rely on thrown errors bubbling up from here to halt the transaction
-      await fn();
-    }
-  }
-
-  private async processPreCommit(): Promise<void> {
-    const callbacks = this.preCommitCallbacks;
-    this.preCommitCallbacks = [];
-    for (const cb of callbacks) {
-      // rely on thrown errors bubbling up from here to halt the transaction
-      await cb();
-    }
-  }
-
-  async postCommit(fn: () => Promise<void>): Promise<void> {
-    if (this.transactionDepth) {
-      this.postCommitCallbacks.push(fn);
-    } else {
-      await this.invokePostCommitCallback(fn);
-    }
-  }
-
-  private async processPostCommit(): Promise<void> {
-    const callbacks = this.postCommitCallbacks;
-    this.postCommitCallbacks = [];
-    for (const cb of callbacks) {
-      await this.invokePostCommitCallback(cb);
-    }
-  }
-
-  private async invokePostCommitCallback(fn: () => Promise<void>): Promise<void> {
-    try {
-      await fn();
-    } catch (err) {
-      if (err instanceof Error) {
-        getLogger().error('Error processing post-commit callback', err);
-      } else {
-        getLogger().error('Error processing post-commit callback', { err });
-      }
-    }
-  }
-
-  /**
-   * Checks whether an error represents a serialization conflict that can safely be retried.
-   * NOTE: Retrying a transaction must be done in full: the entire `Repository.withTransaction()` block
-   * should be re-executed, in a new transaction.
-   * @param err - The error to check.
-   * @returns True if the error indicates a retryable transaction failure.
-   */
-  private isRetryableTransactionError(err: OperationOutcomeError): boolean {
-    if (this.transactionDepth) {
-      // Nested transactions (i.e. savepoints) are NOT retryable per the Postgres docs;
-      // the entire transaction must have been rolled back before anything can be retried:
-      // "It is important to retry the complete transaction, including all logic
-      // that decides which SQL to issue and/or which values to use"
-      // @see https://www.postgresql.org/docs/16/mvcc-serialization-failure-handling.html
-      return false;
-    }
-    if (err.outcome.issue.length !== 1) {
-      // Multiple errors combined cannot be guaranteed to be retryable
-      return false;
-    }
-
-    const issue = err.outcome.issue[0];
-    return Boolean(
-      issue.code === 'conflict' &&
-      issue.details?.coding?.some((c) => retryableTransactionErrorCodes.includes(c.code as string))
+    this.assertUsable();
+    return this.connection.withTransaction(
+      this.connectionScope,
+      async (txScope) => {
+        // create transaction-scoped repository within RepositoryConnection.withTransaction callback
+        // since the callback is only invoked after a sticky PoolClient is established to begin the
+        // transaction.
+        const txnScopedRepo = this.createTransactionScopedRepo(txScope);
+        return callback(txnScopedRepo);
+      },
+      options
     );
+  }
+
+  async withStatementTimeout<TResult>(
+    options: StatementTimeoutOptions,
+    callback: (client: PoolClient) => Promise<TResult>
+  ): Promise<TResult> {
+    this.assertUsable();
+    if (!this.ownsConnection) {
+      throw new Error('Cannot set statement timeout on a borrowed repository connection');
+    }
+    return this.connection.withStatementTimeout(options, callback);
+  }
+
+  async preCommit(fn: () => void | Promise<void>): Promise<void> {
+    this.assertUsable();
+    return this.connection.preCommit(this.connectionScope, async () => fn());
+  }
+
+  async postCommit(fn: () => void | Promise<void>): Promise<void> {
+    this.assertUsable();
+    return this.connection.postCommit(this.connectionScope, async () => fn());
   }
 
   /**
@@ -2620,11 +2249,10 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
     id: string
   ): Promise<CacheEntry<WithId<T>> | undefined> {
     // No cache access allowed mid-transaction
-    if (this.transactionDepth) {
+    if (this.connection.isInTransaction()) {
       return undefined;
     }
-    const cachedValue = await getRedis().get(getCacheKey(resourceType, id));
-    return cachedValue ? (JSON.parse(cachedValue) as CacheEntry<WithId<T>>) : undefined;
+    return getResourceCacheEntry<T>(resourceType, id);
   }
 
   /**
@@ -2634,41 +2262,11 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    */
   private async getCacheEntries(references: Reference[]): Promise<(CacheEntry | undefined)[]> {
     // No cache access allowed mid-transaction
-    if (this.transactionDepth) {
+    if (this.connection.isInTransaction()) {
       return new Array(references.length);
     }
 
-    const referenceKeys: string[] = [];
-
-    // Build referenceKeys only for valid input references and track
-    // their indices in the original array so that the result array
-    // is constructed in the correct order.
-    const referenceKeyIndices: number[] = new Array(references.length);
-    for (let i = 0; i < references.length; i++) {
-      const r = references[i];
-      if (r.reference) {
-        referenceKeys.push(r.reference);
-        referenceKeyIndices[i] = referenceKeys.length - 1;
-      }
-    }
-
-    if (referenceKeys.length === 0) {
-      // Return early to avoid calling mget() with no args, which is an error
-      return new Array(references.length);
-    }
-
-    const cachedValues = await getRedis().mget(referenceKeys);
-
-    const result = new Array<CacheEntry | undefined>(references.length);
-    for (let i = 0; i < references.length; i++) {
-      if (referenceKeyIndices[i] === undefined) {
-        result[i] = undefined;
-      } else {
-        const cachedValue = cachedValues[referenceKeyIndices[i]];
-        result[i] = cachedValue ? (JSON.parse(cachedValue) as CacheEntry) : undefined;
-      }
-    }
-    return result;
+    return getResourceCacheEntries(references);
   }
 
   /**
@@ -2677,7 +2275,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    */
   private async setCacheEntry(resource: WithId<Resource>): Promise<void> {
     // No cache access allowed mid-transaction
-    if (this.transactionDepth) {
+    if (this.connection.isInTransaction()) {
       const cachedResource = deepClone(resource);
       await this.postCommit(() => {
         return this.setCacheEntry(cachedResource);
@@ -2685,13 +2283,7 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
       return;
     }
 
-    const projectId = resource.meta?.project;
-    await getRedis().set(
-      getCacheKey(resource.resourceType, resource.id),
-      stringify({ resource, projectId }),
-      'EX',
-      REDIS_CACHE_EX_SECONDS
-    );
+    await setResourceCacheEntry(resource);
   }
 
   /**
@@ -2701,12 +2293,12 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    */
   private async deleteCacheEntry(resourceType: string, id: string): Promise<void> {
     // No cache access allowed mid-transaction
-    if (this.transactionDepth) {
+    if (this.connection.isInTransaction()) {
       await this.postCommit(() => this.deleteCacheEntry(resourceType, id));
       return;
     }
 
-    await getRedis().del(getCacheKey(resourceType, id));
+    await deleteResourceCacheEntry(resourceType, id);
   }
 
   /**
@@ -2716,105 +2308,72 @@ export class Repository extends FhirRepository<PoolClient> implements Disposable
    */
   private async deleteCacheEntries(resourceType: string, ids: string[]): Promise<void> {
     // No cache access allowed mid-transaction
-    if (this.transactionDepth) {
+    if (this.connection.isInTransaction()) {
       await this.postCommit(() => this.deleteCacheEntries(resourceType, ids));
       return;
     }
 
-    const cacheKeys = ids.map((id) => {
-      return getCacheKey(resourceType, id);
-    });
-
-    await getRedis().del(cacheKeys);
+    await deleteResourceCacheEntries(resourceType, ids);
   }
 
-  async ensureInTransaction<TResult>(callback: (client: PoolClient) => Promise<TResult>): Promise<TResult> {
-    if (this.transactionDepth) {
-      const client = await this.getConnection(DatabaseMode.WRITER);
-      return callback(client);
-    } else {
-      return this.withTransaction(callback);
+  async ensureInTransaction<TResult>(callback: (repo: this) => Promise<TResult>): Promise<TResult> {
+    this.assertUsable();
+    if (this.connection.isInTransaction()) {
+      return callback(this);
     }
+
+    return this.withTransaction(callback);
   }
 
-  getConfig(): RepositoryContext {
+  getConfig(): Readonly<RepositoryContext> {
     return this.context;
   }
 
   [Symbol.dispose](removeConnection?: boolean): void {
-    this.assertNotClosed();
-    if (this.transactionDepth > 0) {
-      // Bad state, remove connection from pool
-      getLogger().error('Closing Repository with active transaction');
-      this.releaseConnection(new Error('Closing Repository with active transaction'));
-    } else {
-      // Good state, return healthy connection to pool
-      this.releaseConnection(removeConnection);
+    // idempotent
+    if (this.closed) {
+      return;
     }
     this.closed = true;
-  }
-
-  private assertNotClosed(): void {
-    if (this.closed) {
-      throw new Error('Already closed');
+    if (this.ownsConnection) {
+      this.connection[Symbol.dispose](removeConnection);
     }
   }
-}
 
-const REDIS_CACHE_EX_SECONDS = 24 * 60 * 60; // 24 hours in seconds
-const PROFILE_CACHE_EX_SECONDS = 5 * 60; // 5 minutes in seconds
-
-/**
- * Returns the redis cache key for the given resource type and resource ID.
- * @param resourceType - The resource type.
- * @param id - The resource ID.
- * @returns The Redis cache key.
- */
-function getCacheKey(resourceType: string, id: string): string {
-  return `${resourceType}/${id}`;
-}
-
-/**
- * Writes a FHIR profile cache entry to Redis.
- * @param profile - The profile structure definition.
- */
-async function cacheProfile(profile: StructureDefinition): Promise<void> {
-  if (!profile.url || !profile.meta?.project) {
-    return;
+  isClosed(): boolean {
+    return this.closed || this.connection.isScopeEnded(this.connectionScope);
   }
-  profile = await getSystemRepo().readReference(createReference(profile));
-  await getRedis().set(
-    getProfileCacheKey(profile.meta?.project as string, profile.url),
-    JSON.stringify({ resource: profile, projectId: profile.meta?.project }),
-    'EX',
-    PROFILE_CACHE_EX_SECONDS
-  );
-}
 
-/**
- * Writes a FHIR profile cache entry to Redis.
- * @param profile - The profile structure definition.
- */
-async function removeCachedProfile(profile: StructureDefinition): Promise<void> {
-  if (!profile.url || !profile.meta?.project) {
-    return;
+  private assertUsable(): void {
+    if (this.isClosed()) {
+      throw new Error('Already closed');
+    }
+    this.connection.assertScope(this.connectionScope);
   }
-  await getRedis().del(getProfileCacheKey(profile.meta.project, profile.url));
 }
+
+export class SystemRepository extends Repository {}
+
+type SystemRepositoryContextDefaults = Pick<RepositoryContext, 'skipBackgroundJobs'>;
 
 /**
- * Returns the redis cache key for the given profile resource.
- * @param projectId - The ID of the Project to which the profile belongs.
- * @param url - The canonical URL of the profile.
- * @returns The Redis cache key.
+ * Creates a SystemRepository for the specified shard.
+ * @param shardId - The shard ID.
+ * @param connection - Optional repository connection for transaction support.
+ * @param connectionScope - Optional scope for the connection.
+ * @param contextDefaults - Optional context defaults to apply before the fixed SystemRepository context.
+ * @returns A SystemRepository instance.
  */
-function getProfileCacheKey(projectId: string, url: string): string {
-  return `Project/${projectId}/StructureDefinition/${url}`;
-}
-
-export function getSystemRepo(conn?: PoolClient): Repository {
-  return new Repository(
+function createSystemRepository(
+  shardId: string,
+  connection?: RepositoryConnection,
+  connectionScope?: ConnectionScope,
+  contextDefaults?: SystemRepositoryContextDefaults
+): SystemRepository {
+  return new SystemRepository(
     {
+      ...contextDefaults,
+      shardId,
       superAdmin: true,
       strictMode: true,
       extendedMode: true,
@@ -2823,71 +2382,97 @@ export function getSystemRepo(conn?: PoolClient): Repository {
       },
       // System repo does not have an associated Project; it can write to any
     },
-    conn
+    connection,
+    connectionScope
   );
 }
 
-function lowercaseFirstLetter(str: string): string {
-  return str.charAt(0).toLowerCase() + str.slice(1);
-}
+/*
+SystemRepository getters in order of preference:
 
-function resolveFieldName(input: any, fieldName: string): string[] {
-  if (!fieldName.endsWith('[x]')) {
-    return [fieldName];
-  }
+1. repo.getSystemRepo() - If a non-system repo is already available, elevate it to a SystemRepository
+2. AuthenticatedRequestContext.systemRepo() - If in an authenticated request handler, a shortcut for ctx.repo.getSystemRepo()
+3. getProjectSystemRepo(projectOrIdOrReference) - If a project, project ID, or Project reference is available. This should
+    typically be used in pre-authed code before an AuthenticatedRequestContext has been established.
+4. getGlobalSystemRepo() - If none of the above are applicable, the global system last resort. There should
+    be a very good reason for using it; often also in pre-auth code. Supply a comment explaining why its being used.
 
-  const baseKey = fieldName.slice(0, -3);
-  return Object.keys(input).filter((k) => {
-    if (k.startsWith(baseKey)) {
-      const maybePropertyType = k.substring(baseKey.length);
-      if (maybePropertyType in PropertyType || lowercaseFirstLetter(maybePropertyType) in PropertyType) {
-        return true;
-      }
-    }
-    return false;
-  });
-}
-
-export function setTypedPropertyValue(target: TypedValue, path: string, replacement: TypedValue): void {
-  let patchPath = '/' + path.replaceAll(/\[|\]\.|\./g, '/');
-  if (patchPath.endsWith(']')) {
-    patchPath = patchPath.slice(0, -1);
-  }
-  patchObject(target.value, [{ op: 'replace', path: patchPath, value: replacement.value }]);
-}
-
-const textEncoder = new TextEncoder();
+You'll also notice getShardSystemRepo(), but there's very little reason this one should be needed right now. It's
+mostly intended for system-level, super-admin triggered operations against a particular DB.
+*/
 
 /**
- * Apply a maximum string length to ensure the value can accommodate the maximum
- * size for a btree index entry: 2704 bytes. If the string is too large,
- * be as conservative as possible to avoid write errors by truncating to 675 characters
- * to accommodate the entire string being 4-byte UTF-8 code points.
- * @param value - The column value to truncate.
- * @returns The possibly truncated column value.
+ * Returns a SystemRepository for the global shard.
+ *
+ * Use this for operations that don't have project context:
+ * - Authentication (before project is known)
+ * - Looking up Users, Logins, ClientApplications
+ * - Cross-project operations by super admins
+ *
+ * @param connection - Optional repository connection to use in new Repository.
+ * @param contextDefaults - Optional context defaults to apply before the fixed SystemRepository context.
+ * @returns A SystemRepository for the global shard.
  */
-function truncateTextColumn(value: string | undefined): string | undefined {
-  if (!value) {
-    return undefined;
-  }
-
-  if (textEncoder.encode(value).length <= 2704) {
-    return value;
-  }
-
-  return Array.from(value).slice(0, 675).join('');
+export function getGlobalSystemRepo(
+  connection?: RepositoryConnection,
+  contextDefaults?: SystemRepositoryContextDefaults
+): SystemRepository {
+  return createSystemRepository(GLOBAL_SHARD_ID, connection, undefined, contextDefaults);
 }
 
-function getArrayPaddingConfig(
-  searchParam: SearchParameter,
-  resourceType: string
-): ArrayColumnPaddingConfig | undefined {
-  const paddingConfigEntry = getConfig().arrayColumnPadding?.[searchParam.code];
-  if (
-    paddingConfigEntry &&
-    (paddingConfigEntry.resourceType === undefined || paddingConfigEntry.resourceType.includes(resourceType))
-  ) {
-    return paddingConfigEntry.config;
-  }
-  return undefined;
+/**
+ * This is a sharding future-proofing function that returns a SystemRepository for the specified shard.
+ * Prefer using `Repository.getSystemRepo` or `getProjectSystemRepo` if working in the context of a project
+ * or `getGlobalSystemRepo` if intentionally working in the global shard.
+ * @param shardId - The shard ID. Currently ignored.
+ * @param connection - Optional repository connection to use in new Repository.
+ * @param contextDefaults - Optional context defaults to apply before the fixed SystemRepository context.
+ * @returns A SystemRepository for the specified shard.
+ */
+export function getShardSystemRepo(
+  shardId: string,
+  connection?: RepositoryConnection,
+  contextDefaults?: SystemRepositoryContextDefaults
+): SystemRepository {
+  return createSystemRepository(shardId, connection, undefined, contextDefaults);
 }
+
+/**
+ * Returns a SystemRepository for the specified project's shard.
+ *
+ * Note: This is a passthrough to `getGlobalSystemRepo` to facilitate
+ * future sharding support.
+ *
+ * @param _projectId - The project's ID, reference, or resource.
+ * @returns A SystemRepository for the project's shard.
+ */
+export async function getProjectSystemRepo(
+  _projectId: string | Reference<Project> | WithId<Project>
+): Promise<SystemRepository> {
+  // Eventually, this will resolve the project's shard and return
+  // a SystemRepository for that shard.
+  // But for now, all projects are on the global shard.
+  return getGlobalSystemRepo();
+}
+
+const patchOperationDefinition: OperationDefinition = {
+  resourceType: 'OperationDefinition',
+  name: 'FHIRPatch',
+  code: 'UNUSED',
+  kind: 'operation',
+  status: 'unknown',
+  system: false,
+  type: false,
+  instance: false,
+  parameter: [
+    makeOperationDefinitionParameter('in', 'operation', undefined, 1, '*', [
+      makeOperationDefinitionParameter('in', 'type', 'code', 1, '1'),
+      makeOperationDefinitionParameter('in', 'path', 'string', 1, '1'),
+      makeOperationDefinitionParameter('in', 'name', 'string', 0, '1'),
+      makeOperationDefinitionParameter('in', 'value', 'Any', 0, '1'),
+      makeOperationDefinitionParameter('in', 'index', 'integer', 0, '1'),
+      makeOperationDefinitionParameter('in', 'source', 'integer', 0, '1'),
+      makeOperationDefinitionParameter('in', 'destination', 'integer', 0, '1'),
+    ]),
+  ],
+};

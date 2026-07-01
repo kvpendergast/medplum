@@ -4,10 +4,8 @@ import type { WithId } from '@medplum/core';
 import {
   allOk,
   badRequest,
-  ContentType,
   created,
   createReference,
-  encodeBase64,
   getReferenceString,
   isOk,
   normalizeErrorString,
@@ -16,14 +14,12 @@ import {
   Operator,
   parseSearchRequest,
   preconditionFailed,
-  toTypedValue,
 } from '@medplum/core';
+import { RepositoryMode } from '@medplum/fhir-router';
 import type {
   Binary,
   BundleEntry,
-  ElementDefinition,
   Login,
-  Observation,
   OperationOutcome,
   Organization,
   Patient,
@@ -34,50 +30,48 @@ import type {
   ResearchDefinition,
   ResourceType,
   ServiceRequest,
-  StructureDefinition,
   User,
   UserConfiguration,
-  ValueSet,
 } from '@medplum/fhirtypes';
-import { randomBytes, randomUUID } from 'crypto';
-import { readFileSync } from 'fs';
-import assert from 'node:assert';
-import { resolve } from 'path';
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { MockInstance } from 'vitest';
+import { vi } from 'vitest';
 import { initAppServices, shutdownApp } from '../app';
-import type { RegisterRequest } from '../auth/register';
-import { registerNew } from '../auth/register';
 import { getConfig, loadTestConfig } from '../config/loader';
 import { r4ProjectId, systemResourceProjectId } from '../constants';
+import { runInAuthenticatedContext } from '../context';
 import { DatabaseMode, getDatabasePool } from '../database';
 import { getLogger } from '../logger';
-import { bundleContains, createTestProject, withTestContext } from '../test.setup';
+import { bundleContains, createTestProject, spyOnQuery, withTestContext } from '../test.setup';
+import { AuditEventOutcome, createAuditEvent, ReadInteraction, RestfulOperationType } from '../util/auditevent';
+import * as workersModule from '../workers';
 import { getRepoForLogin } from './accesspolicy';
-import { getSystemRepo, Repository, setTypedPropertyValue } from './repo';
+import { getGlobalSystemRepo, getProjectSystemRepo, getShardSystemRepo, Repository } from './repo';
 import { SelectQuery } from './sql';
+import * as tokenColumnModule from './token-column';
 
-jest.mock('hibp');
+vi.mock('hibp');
 
 describe('FHIR Repo', () => {
+  const globalSystemRepo = getGlobalSystemRepo();
   let testProject: WithId<Project>;
 
   let testProjectRepo: Repository;
   let systemRepo: Repository;
 
-  const usCorePatientProfile = JSON.parse(
-    readFileSync(resolve(__dirname, '__test__/us-core-patient.json'), 'utf8')
-  ) as StructureDefinition;
-
   beforeAll(async () => {
     const config = await loadTestConfig();
     await initAppServices(config);
 
-    testProject = await getSystemRepo().createResource({
+    testProject = await globalSystemRepo.createResource({
       resourceType: 'Project',
       id: randomUUID(),
     });
+    systemRepo = await getProjectSystemRepo(testProject);
     testProjectRepo = new Repository({
       projects: [testProject],
       extendedMode: true,
+      strictMode: true,
       author: {
         reference: 'Practitioner/' + randomUUID(),
       },
@@ -88,28 +82,123 @@ describe('FHIR Repo', () => {
     await shutdownApp();
   });
 
-  beforeEach(() => {
-    systemRepo = getSystemRepo();
-  });
-
   test('getRepoForLogin', async () => {
-    await expect(() =>
+    await expect(
       getRepoForLogin({
         login: { resourceType: 'Login' } as Login,
         membership: {
           resourceType: 'ProjectMembership',
           project: createReference(testProject),
+          profile: { display: 'Fake profile' },
         } as WithId<ProjectMembership>,
         project: testProject,
         userConfig: {} as UserConfiguration,
       })
-    ).rejects.toThrow('Invalid author reference');
+    ).rejects.toThrow('Invalid reference');
+  });
+
+  describe('setMode routes reads to reader until writer promotion', () => {
+    type PoolQuerySpy = MockInstance<ReturnType<typeof getDatabasePool>['query']>;
+    let readerPoolQuerySpy: PoolQuerySpy;
+    let writerPoolQuerySpy: PoolQuerySpy;
+
+    function resetSpies(): void {
+      readerPoolQuerySpy.mockClear();
+      writerPoolQuerySpy.mockClear();
+    }
+
+    beforeAll(() => {
+      readerPoolQuerySpy = vi.spyOn(getDatabasePool(DatabaseMode.READER), 'query');
+      writerPoolQuerySpy = vi.spyOn(getDatabasePool(DatabaseMode.WRITER), 'query');
+    });
+
+    beforeEach(() => {
+      resetSpies();
+    });
+
+    afterAll(() => {
+      readerPoolQuerySpy.mockRestore();
+      writerPoolQuerySpy.mockRestore();
+    });
+
+    test('on creates', () =>
+      withTestContext(async () => {
+        const repo = testProjectRepo.clone();
+
+        repo.setMode(RepositoryMode.READER);
+        await expect(repo.readResource('Patient', randomUUID())).rejects.toThrow('Not found');
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(repo.mode).toBe(RepositoryMode.READER);
+        resetSpies();
+
+        await repo.createResource<Patient>({ resourceType: 'Patient' });
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(repo.mode).toBe(RepositoryMode.WRITER);
+        resetSpies();
+
+        await expect(repo.readResource('Patient', randomUUID())).rejects.toThrow('Not found'); // randomUUID to ensure cache miss
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(repo.mode).toBe(RepositoryMode.WRITER);
+        resetSpies();
+
+        repo.setMode(RepositoryMode.READER);
+        await expect(repo.readResource('Patient', randomUUID())).rejects.toThrow('Not found');
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(repo.mode).toBe(RepositoryMode.READER);
+      }));
+
+    test('on updates', () =>
+      withTestContext(async () => {
+        // AuditEvent since it does not get cached on writes
+        const auditEvent = await testProjectRepo
+          .clone()
+          .createResource(
+            createAuditEvent(
+              RestfulOperationType,
+              ReadInteraction,
+              randomUUID(),
+              { reference: 'Practitioner/user-123' },
+              undefined,
+              AuditEventOutcome.Success
+            )
+          );
+
+        const repo = testProjectRepo.clone();
+
+        repo.setMode(RepositoryMode.READER);
+        await expect(repo.readResource('AuditEvent', randomUUID())).rejects.toThrow('Not found');
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        resetSpies();
+
+        // in reader mode, no reader pool query is made for updateResource
+        await repo.updateResource({ ...auditEvent, outcomeDesc: 'updated' });
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(repo.mode).toBe(RepositoryMode.WRITER);
+        resetSpies();
+
+        await expect(repo.readResource('AuditEvent', randomUUID())).rejects.toThrow('Not found');
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(repo.mode).toBe(RepositoryMode.WRITER);
+        resetSpies();
+
+        await repo.updateResource({ ...auditEvent, outcomeDesc: 'something new' });
+        expect(readerPoolQuerySpy).toHaveBeenCalledTimes(0);
+        expect(writerPoolQuerySpy).toHaveBeenCalledTimes(1);
+        expect(repo.mode).toBe(RepositoryMode.WRITER);
+      }));
   });
 
   test('Read resource with undefined id', async () => {
     try {
       await systemRepo.readResource('Patient', undefined as unknown as string);
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       const outcome = (err as OperationOutcomeError).outcome;
       expect(isOk(outcome)).toBe(false);
@@ -119,7 +208,7 @@ describe('FHIR Repo', () => {
   test('Read resource with blank id', async () => {
     try {
       await systemRepo.readResource('Patient', '');
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       const outcome = (err as OperationOutcomeError).outcome;
       expect(isOk(outcome)).toBe(false);
@@ -129,11 +218,69 @@ describe('FHIR Repo', () => {
   test('Read resource with invalid id', async () => {
     try {
       await systemRepo.readResource('Patient', 'x');
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       const outcome = (err as OperationOutcomeError).outcome;
       expect(isOk(outcome)).toBe(false);
     }
+  });
+
+  test('Read Binary requires access to securityContext', async () => {
+    const patient = await withTestContext(() => globalSystemRepo.createResource<Patient>({ resourceType: 'Patient' }));
+    const binary = await withTestContext(() =>
+      globalSystemRepo.createResource<Binary>({
+        resourceType: 'Binary',
+        contentType: 'text/plain',
+        securityContext: createReference(patient),
+      })
+    );
+    const versionId = binary.meta?.versionId as string;
+
+    const repoWithoutPatientAccess = new Repository({
+      author: { reference: 'Practitioner/' + randomUUID() },
+      accessPolicy: {
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Binary', interaction: ['read', 'vread'] }],
+      },
+    });
+
+    await expect(repoWithoutPatientAccess.readResource<Binary>('Binary', binary.id)).rejects.toThrow();
+    await expect(repoWithoutPatientAccess.readReference<Binary>(createReference(binary))).rejects.toThrow();
+    await expect(repoWithoutPatientAccess.readVersion<Binary>('Binary', binary.id, versionId)).rejects.toThrow();
+    const deniedReferences = await repoWithoutPatientAccess.readReferences<Binary>([createReference(binary)]);
+    expect(deniedReferences[0]).toBeInstanceOf(Error);
+
+    const repoWithPatientAccess = new Repository({
+      author: { reference: 'Practitioner/' + randomUUID() },
+      accessPolicy: {
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Binary' }, { resourceType: 'Patient' }],
+      },
+    });
+
+    await expect(repoWithPatientAccess.readResource<Binary>('Binary', binary.id)).resolves.toMatchObject({
+      id: binary.id,
+    });
+    await expect(repoWithPatientAccess.readReference<Binary>(createReference(binary))).resolves.toMatchObject({
+      id: binary.id,
+    });
+  });
+
+  test('Write Binary rejects Binary securityContext', async () => {
+    const binary = await withTestContext(() =>
+      globalSystemRepo.createResource<Binary>({
+        resourceType: 'Binary',
+        contentType: 'text/plain',
+        data: Buffer.from('recursive security context').toString('base64'),
+      })
+    );
+
+    await expect(
+      globalSystemRepo.updateResource<Binary>({
+        ...binary,
+        securityContext: createReference(binary),
+      })
+    ).rejects.toThrow('Binary.securityContext cannot reference another Binary');
   });
 
   test('Read invalid resource with `checkCacheOnly` set', async () => {
@@ -142,31 +289,56 @@ describe('FHIR Repo', () => {
     );
   });
 
+  test('Read AuditEvent after update', async () => {
+    const projectId = testProject.id;
+    const resource = await systemRepo.createResource({ resourceType: 'Patient', meta: { project: projectId } });
+    const data = createAuditEvent(
+      RestfulOperationType,
+      ReadInteraction,
+      projectId,
+      undefined,
+      undefined,
+      AuditEventOutcome.Success,
+      { resource }
+    );
+
+    let auditEvent = await systemRepo.createResource(data);
+    // Read resource to load into cache
+    auditEvent = await systemRepo.readResource('AuditEvent', auditEvent.id);
+
+    const updatedEvent = await systemRepo.updateResource({ ...auditEvent, outcomeDesc: 'foo' });
+    expect(updatedEvent.outcomeDesc).not.toStrictEqual(auditEvent.outcomeDesc);
+
+    // Re-read resource; should get the updated data
+    auditEvent = await systemRepo.readResource('AuditEvent', auditEvent.id);
+    expect(updatedEvent.outcomeDesc).toStrictEqual(auditEvent.outcomeDesc);
+  });
+
   test('Repo read malformed reference', async () => {
     try {
       await systemRepo.readReference({ reference: undefined });
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       expect((err as OperationOutcome).id).not.toBe('ok');
     }
 
     try {
       await systemRepo.readReference({ reference: '' });
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       expect((err as OperationOutcome).id).not.toBe('ok');
     }
 
     try {
       await systemRepo.readReference({ reference: '////' });
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       expect((err as OperationOutcome).id).not.toBe('ok');
     }
 
     try {
       await systemRepo.readReference({ reference: 'Patient/123/foo' });
-      fail('Should have thrown');
+      expect.fail('Should have thrown');
     } catch (err) {
       expect((err as OperationOutcome).id).not.toBe('ok');
     }
@@ -204,8 +376,6 @@ describe('FHIR Repo', () => {
 
     beforeAll(async () =>
       withTestContext(async () => {
-        systemRepo ??= getSystemRepo();
-
         versions.v1 = await systemRepo.createResource<Patient>({
           resourceType: 'Patient',
           meta: {
@@ -323,7 +493,7 @@ describe('FHIR Repo', () => {
         name: [{ given: ['Update1'], family: 'Update1' }],
       });
 
-      const patient2 = await systemRepo.updateResource<Patient>({
+      const patient2 = await systemRepo.updateResource({
         ...(patient1 as Patient),
       });
 
@@ -383,7 +553,7 @@ describe('FHIR Repo', () => {
       expect(patient.meta?.author?.reference).toStrictEqual('system');
     }));
 
-  test('Create Patient as system on behalf of author', () =>
+  test('Create Patient as system ignores submitted meta.author', () =>
     withTestContext(async () => {
       const author = 'Practitioner/' + randomUUID();
       const patient = await systemRepo.createResource<Patient>({
@@ -396,24 +566,66 @@ describe('FHIR Repo', () => {
         },
       });
 
-      expect(patient.meta?.author?.reference).toStrictEqual(author);
+      expect(patient.meta?.author?.reference).toStrictEqual('system');
+    }));
+
+  test('Super Admin update ignores submitted meta.author', () =>
+    withTestContext(async () => {
+      const { client, repo } = await createTestProject({ withClient: true, withRepo: true, superAdmin: true });
+      const fakeAuthor = 'Practitioner/' + randomUUID();
+
+      const patient = await repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Alice'], family: 'Smith' }],
+      });
+
+      expect(patient.meta?.author?.reference).toStrictEqual(getReferenceString(client));
+
+      const updated = await repo.updateResource<Patient>({
+        ...patient,
+        name: [{ given: ['Alice'], family: 'Jones' }],
+        meta: {
+          ...patient.meta,
+          author: { reference: fakeAuthor },
+        },
+      });
+
+      expect(updated.meta?.author?.reference).toStrictEqual(getReferenceString(client));
     }));
 
   test('Create Patient as ClientApplication with no author', () =>
     withTestContext(async () => {
       const { client, repo } = await createTestProject({ withClient: true, withRepo: true });
+      const addBackgroundJobsSpy = vi.spyOn(workersModule, 'addBackgroundJobs').mockResolvedValue(undefined);
+      try {
+        const patient = await repo.createResource<Patient>({
+          resourceType: 'Patient',
+          name: [{ given: ['Alice'], family: 'Smith' }],
+          identifier: [],
+        });
 
-      const patient = await repo.createResource<Patient>({
-        resourceType: 'Patient',
-        name: [{ given: ['Alice'], family: 'Smith' }],
-        identifier: [],
-      });
+        expect(patient.meta?.author?.reference).toStrictEqual(getReferenceString(client));
 
-      expect(patient.meta?.author?.reference).toStrictEqual(getReferenceString(client));
+        expect(addBackgroundJobsSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            resourceType: 'Patient',
+            id: patient.id,
+          }),
+          undefined,
+          expect.objectContaining({
+            interaction: 'create',
+            project: expect.objectContaining({
+              id: patient.meta?.project,
+            }),
+          })
+        );
 
-      // empty identifier array should removed when read from cache
-      const readPatient = await repo.readResource<Patient>('Patient', patient.id, { checkCacheOnly: true });
-      expect(readPatient.identifier).toBeUndefined();
+        // empty identifier array should removed when read from cache
+        const readPatient = await repo.readResource<Patient>('Patient', patient.id, { checkCacheOnly: true });
+        expect(readPatient.identifier).toBeUndefined();
+      } finally {
+        addBackgroundJobsSpy.mockRestore();
+      }
     }));
 
   test('Create Patient as Practitioner with no author', () =>
@@ -462,6 +674,43 @@ describe('FHIR Repo', () => {
       });
 
       expect(patient.meta?.author?.reference).toStrictEqual(author);
+    }));
+
+  test('Skip background jobs when configured', () =>
+    withTestContext(async () => {
+      const { project } = await createTestProject();
+
+      const repo = new Repository({
+        projects: [project],
+        currentProject: project,
+        extendedMode: true,
+        skipBackgroundJobs: true,
+        author: {
+          reference: 'Practitioner/' + randomUUID(),
+        },
+      });
+
+      expect(repo.getSystemRepo().getConfig().skipBackgroundJobs).toBe(true);
+      expect(
+        getShardSystemRepo('test-shard', undefined, { skipBackgroundJobs: true }).getConfig().skipBackgroundJobs
+      ).toBe(true);
+
+      const addBackgroundJobsSpy = vi.spyOn(workersModule, 'addBackgroundJobs').mockResolvedValue(undefined);
+      // Check that createResource, updateResource, and deleteResource all skip addBackgroundJobs.
+      const patient = await repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Alice'], family: 'Smith' }],
+      });
+
+      await repo.updateResource<Patient>({
+        ...patient,
+        active: true,
+      });
+
+      await repo.deleteResource('Patient', patient.id);
+
+      expect(addBackgroundJobsSpy).not.toHaveBeenCalled();
+      addBackgroundJobsSpy.mockRestore();
     }));
 
   test('Create resource with lastUpdated', () =>
@@ -542,8 +791,8 @@ describe('FHIR Repo', () => {
       expect((rest as Patient).id).toBeUndefined();
 
       try {
-        await systemRepo.updateResource<Patient>(rest);
-        fail('Should have thrown');
+        await systemRepo.updateResource(rest);
+        expect.fail('Should have thrown');
       } catch (err) {
         expect((err as OperationOutcomeError).outcome).toMatchObject(badRequest('Missing id'));
       }
@@ -608,25 +857,85 @@ describe('FHIR Repo', () => {
       ).rejects.toThrow(new OperationOutcomeError(preconditionFailed));
     }));
 
+  test('Patch resource with implicit array creation', () =>
+    withTestContext(async () => {
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ family: 'Test' }],
+      });
+
+      const patched = await systemRepo.patchResource<Patient>(patient.resourceType, patient.id, [
+        { op: 'add', path: '/identifier/-', value: { system: 'https://example.com', value: '123' } },
+      ]);
+      expect(patched.identifier?.at(0)?.system).toStrictEqual('https://example.com');
+      expect(patched.identifier?.at(0)?.value).toStrictEqual('123');
+    }));
+
+  test('Patch resource with FHIRPath Patch body', () =>
+    withTestContext(async () => {
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ family: 'Test' }],
+      });
+
+      const patched = await systemRepo.patchResource<Patient>(patient.resourceType, patient.id, {
+        resourceType: 'Parameters',
+        parameter: [
+          {
+            name: 'operation',
+            part: [
+              { name: 'type', valueCode: 'add' },
+              { name: 'path', valueString: `Patient.name.where(family = 'Test')` },
+              { name: 'name', valueString: 'given' },
+              { name: 'value', valueString: 'Jan' },
+            ],
+          },
+        ],
+      });
+      expect(patched.name?.[0]?.given).toStrictEqual(['Jan']);
+    }));
+
+  test('Patch resource with empty FHIRPath Patch body', () =>
+    withTestContext(async () => {
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ family: 'Test' }],
+      });
+
+      const patched = await systemRepo.patchResource<Patient>(patient.resourceType, patient.id, {
+        resourceType: 'Parameters',
+        // Invalid patch body: patch operation with unknown type
+        parameter: [
+          {
+            name: 'operation',
+            part: [
+              { name: 'type', valueCode: 'unsupported' },
+              { name: 'path', valueString: 'Patient' },
+            ],
+          },
+        ],
+      });
+      // Resource should be returned unaltered, since invalid operation was ignored
+      expect(patched.meta?.versionId).toStrictEqual(patient.meta?.versionId);
+    }));
+
+  test('Patch resource with invalid FHIRPath Patch body', () =>
+    withTestContext(async () => {
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ family: 'Test' }],
+      });
+
+      const patched = await systemRepo.patchResource<Patient>(patient.resourceType, patient.id, {
+        resourceType: 'Parameters',
+      });
+      // Resource should be returned unaltered
+      expect(patched.meta?.versionId).toStrictEqual(patient.meta?.versionId);
+    }));
+
   test('Compartment permissions', () =>
     withTestContext(async () => {
-      const registration1: RegisterRequest = {
-        firstName: randomUUID(),
-        lastName: randomUUID(),
-        projectName: randomUUID(),
-        email: randomUUID() + '@example.com',
-        password: randomUUID(),
-      };
-
-      const result1 = await registerNew(registration1);
-      expect(result1.profile).toBeDefined();
-
-      const repo1 = await getRepoForLogin({
-        project: result1.project,
-        membership: result1.membership,
-        login: result1.login,
-        userConfig: {} as UserConfiguration,
-      });
+      const { repo: repo1 } = await createTestProject({ withRepo: true });
       const patient1 = await repo1.createResource<Patient>({
         resourceType: 'Patient',
       });
@@ -638,26 +947,10 @@ describe('FHIR Repo', () => {
       expect(patient2).toBeDefined();
       expect(patient2.id).toStrictEqual(patient1.id);
 
-      const registration2: RegisterRequest = {
-        firstName: randomUUID(),
-        lastName: randomUUID(),
-        projectName: randomUUID(),
-        email: randomUUID() + '@example.com',
-        password: randomUUID(),
-      };
-
-      const result2 = await registerNew(registration2);
-      expect(result2.profile).toBeDefined();
-
-      const repo2 = await getRepoForLogin({
-        project: result2.project,
-        membership: result2.membership,
-        login: result2.login,
-        userConfig: {} as UserConfiguration,
-      });
+      const { repo: repo2 } = await createTestProject({ withRepo: true });
       try {
         await repo2.readResource('Patient', patient1.id);
-        fail('Should have thrown');
+        expect.fail('Should have thrown');
       } catch (err) {
         expect((err as OperationOutcomeError).outcome).toMatchObject(notFound);
       }
@@ -716,7 +1009,7 @@ describe('FHIR Repo', () => {
 
     try {
       await repo.reindexResource('Practitioner', randomUUID());
-      fail('Expected error');
+      expect.fail('Expected error');
     } catch (err) {
       expect(isOk(err as OperationOutcome)).toBe(false);
     }
@@ -727,10 +1020,8 @@ describe('FHIR Repo', () => {
     });
 
     try {
-      await repo.withTransaction(async (conn) => {
-        await repo.reindexResources(conn, [patient]);
-      });
-      fail('Expected error');
+      await repo.reindexResources([patient]);
+      expect.fail('Expected error');
     } catch (err) {
       expect(isOk(err as OperationOutcome)).toBe(false);
     }
@@ -739,7 +1030,7 @@ describe('FHIR Repo', () => {
   test('Reindex resource not found', async () => {
     try {
       await systemRepo.reindexResource('Practitioner', randomUUID());
-      fail('Expected error');
+      expect.fail('Expected error');
     } catch (err) {
       expect(isOk(err as OperationOutcome)).toBe(false);
     }
@@ -752,23 +1043,20 @@ describe('FHIR Repo', () => {
       identifier: [{ system: 'https://example.com/', value: 'some-value' }],
     });
 
-    const buildColumnSpy = jest.spyOn(Repository.prototype as any, 'buildColumn').mockImplementation(() => {
+    // rely on Patient having a search parameter with token-column strategy
+    const buildTokenColumnsSpy = vi.spyOn(tokenColumnModule, 'buildTokenColumns').mockImplementation(() => {
       throw new Error('test error');
     });
     const logger = getLogger();
-    const errorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
 
-    await expect(
-      systemRepo.withTransaction(async (conn) => {
-        await systemRepo.reindexResources(conn, [patient1]);
-      })
-    ).rejects.toThrow('test error');
+    await expect(systemRepo.reindexResources([patient1])).rejects.toThrow('test error');
     expect(errorSpy).toHaveBeenCalledWith('Error building row for resource', {
       resource: 'Patient/' + patient1.id,
       err: expect.any(Error),
     });
 
-    buildColumnSpy.mockRestore();
+    buildTokenColumnsSpy.mockRestore();
     errorSpy.mockRestore();
   });
 
@@ -884,14 +1172,182 @@ describe('FHIR Repo', () => {
       expect(patient2.id).toStrictEqual(patient1.id);
     }));
 
-  test('expungeResource forbidden', async () => {
-    // Try to expunge as a regular user
-    await expect(testProjectRepo.expungeResource('Patient', new Date().toISOString())).rejects.toThrow('Forbidden');
+  describe('expungeResource and expungeResources', () => {
+    async function createPatient(repo: Repository): Promise<WithId<Patient>> {
+      return repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Expunge'], family: randomUUID() }],
+      });
+    }
+
+    async function createPatients(repo: Repository, count: number): Promise<WithId<Patient>[]> {
+      const patients: WithId<Patient>[] = [];
+      for (let i = 0; i < count; i++) {
+        patients.push(await createPatient(repo));
+      }
+      return patients;
+    }
+
+    async function countRows(tableName: string, id: string): Promise<number> {
+      const query = new SelectQuery(tableName).column('id').where('id', '=', id);
+      return (await query.execute(systemRepo.getDatabaseClient(DatabaseMode.READER))).length;
+    }
+
+    async function expectPatientExpunged(patient: WithId<Patient>): Promise<void> {
+      await expect(systemRepo.readResource('Patient', patient.id)).rejects.toThrow();
+      expect(await countRows('Patient', patient.id)).toStrictEqual(0);
+      expect(await countRows('Patient_History', patient.id)).toStrictEqual(0);
+    }
+
+    async function expectPatientPresent(patient: WithId<Patient>): Promise<void> {
+      expect((await systemRepo.readResource('Patient', patient.id)).id).toStrictEqual(patient.id);
+      expect(await countRows('Patient', patient.id)).toStrictEqual(1);
+      expect(await countRows('Patient_History', patient.id)).toBeGreaterThan(0);
+    }
+
+    async function expectPatientsExpunged(...patients: WithId<Patient>[]): Promise<void> {
+      for (const patient of patients) {
+        await expectPatientExpunged(patient);
+      }
+    }
+
+    async function expectPatientsPresent(...patients: WithId<Patient>[]): Promise<void> {
+      for (const patient of patients) {
+        await expectPatientPresent(patient);
+      }
+    }
+
+    async function expectExpungeResult(
+      expunge: () => Promise<void>,
+      forbidden: boolean,
+      expunged: WithId<Patient>[],
+      present: WithId<Patient>[] = []
+    ): Promise<void> {
+      if (forbidden) {
+        await expect(expunge()).rejects.toThrow();
+        await expectPatientsPresent(...expunged, ...present);
+      } else {
+        await expunge();
+        await expectPatientsExpunged(...expunged);
+        await expectPatientsPresent(...present);
+      }
+    }
+
+    type ExpungeAccessCase = {
+      name: string;
+      createRepo: () => Promise<Repository>;
+      forbidden?: boolean;
+      canExpungeOtherProject?: boolean;
+    };
+
+    const expungeAccessCases: ExpungeAccessCase[] = [
+      {
+        name: 'Super Admin',
+        createRepo: async () => (await createTestProject({ withRepo: true, superAdmin: true })).repo,
+        canExpungeOtherProject: true,
+      },
+      {
+        name: 'Project Admin',
+        createRepo: async () => (await createTestProject({ withRepo: true, membership: { admin: true } })).repo,
+        canExpungeOtherProject: false,
+      },
+      {
+        name: 'Non-admin user',
+        createRepo: async () => (await createTestProject({ withRepo: true })).repo,
+        forbidden: true,
+      },
+    ];
+
+    describe.each(expungeAccessCases)('$name', ({ createRepo, forbidden, canExpungeOtherProject }) => {
+      test('expungeResource in own project', async () =>
+        withTestContext(async () => {
+          const repo = await createRepo();
+          const [patient, untouchedPatient] = await createPatients(repo, 2);
+
+          await expectExpungeResult(
+            () => repo.expungeResource('Patient', patient.id),
+            Boolean(forbidden),
+            [patient],
+            [untouchedPatient]
+          );
+        }));
+
+      test('expungeResources in own project', async () =>
+        withTestContext(async () => {
+          const repo = await createRepo();
+          const [patient1, patient2, untouchedPatient] = await createPatients(repo, 3);
+
+          await expectExpungeResult(
+            () => repo.expungeResources('Patient', [patient1.id, patient2.id]),
+            Boolean(forbidden),
+            [patient1, patient2],
+            [untouchedPatient]
+          );
+        }));
+
+      test('expungeResource in another project', async () =>
+        withTestContext(async () => {
+          const repo = await createRepo();
+          const { repo: otherProjectRepo } = await createTestProject({ withRepo: true });
+          const [ownPatient] = await createPatients(repo, 1);
+          const [otherProjectPatient] = await createPatients(otherProjectRepo, 1);
+
+          let expungedPatients: WithId<Patient>[];
+          let presentPatients: WithId<Patient>[];
+          if (canExpungeOtherProject) {
+            expungedPatients = [otherProjectPatient];
+            presentPatients = [ownPatient];
+          } else {
+            expungedPatients = [];
+            presentPatients = [ownPatient, otherProjectPatient];
+          }
+          await expectExpungeResult(
+            () => repo.expungeResource('Patient', otherProjectPatient.id),
+            Boolean(forbidden),
+            expungedPatients,
+            presentPatients
+          );
+        }));
+
+      test('expungeResources with own-project and other-project IDs', async () =>
+        withTestContext(async () => {
+          const repo = await createRepo();
+          const { repo: otherProjectRepo } = await createTestProject({ withRepo: true });
+          const [ownPatient, untouchedPatient] = await createPatients(repo, 2);
+          const [otherProjectPatient] = await createPatients(otherProjectRepo, 1);
+
+          let expungedPatients: WithId<Patient>[];
+          let presentPatients: WithId<Patient>[];
+          if (canExpungeOtherProject) {
+            expungedPatients = [ownPatient, otherProjectPatient];
+            presentPatients = [untouchedPatient];
+          } else {
+            expungedPatients = [ownPatient];
+            presentPatients = [untouchedPatient, otherProjectPatient];
+          }
+          await expectExpungeResult(
+            () => repo.expungeResources('Patient', [ownPatient.id, otherProjectPatient.id]),
+            Boolean(forbidden),
+            expungedPatients,
+            presentPatients
+          );
+        }));
+    });
   });
 
-  test('expungeResources forbidden', async () => {
-    // Try to expunge as a regular user
-    await expect(testProjectRepo.expungeResources('Patient', [new Date().toISOString()])).rejects.toThrow('Forbidden');
+  test('Expunge too many IDs', async () => {
+    await expect(
+      systemRepo.expungeResources(
+        'Patient',
+        Array.from({ length: 10000 }, () => randomUUID())
+      )
+    ).resolves.toBeUndefined();
+    await expect(
+      systemRepo.expungeResources(
+        'Patient',
+        Array.from({ length: 10001 }, () => randomUUID())
+      )
+    ).rejects.toThrow('Expunge request contains too many IDs');
   });
 
   test('Purge forbidden', async () => {
@@ -936,186 +1392,6 @@ describe('FHIR Repo', () => {
 
   test('Malformed client assigned ID', async () => {
     await expect(systemRepo.updateResource({ resourceType: 'Patient', id: '123' })).rejects.toThrow('Invalid id');
-  });
-
-  test('Profile validation', async () =>
-    withTestContext(async () => {
-      const { repo } = await createTestProject({ withRepo: true });
-
-      const profile = { ...usCorePatientProfile, url: 'urn:uuid:' + randomUUID() };
-      const patient: Patient = {
-        resourceType: 'Patient',
-        meta: {
-          profile: [profile.url],
-        },
-        identifier: [
-          {
-            system: 'http://example.com/patient-id',
-            value: 'foo',
-          },
-        ],
-        name: [
-          {
-            given: ['Alex'],
-            family: 'Baker',
-          },
-        ],
-        // Missing gender property is required by profile
-      };
-
-      await expect(repo.createResource(patient)).resolves.toBeTruthy();
-      await repo.createResource(profile);
-      await expect(repo.createResource(patient)).rejects.toThrow(
-        new Error('Missing required property (Patient.gender)')
-      );
-    }));
-
-  test('Profile update', async () =>
-    withTestContext(async () => {
-      const { repo } = await createTestProject({ withRepo: true });
-
-      const profile = await repo.createResource<StructureDefinition>({
-        ...usCorePatientProfile,
-        url: 'urn:uuid:' + randomUUID(),
-      });
-
-      const patient: Patient = {
-        resourceType: 'Patient',
-        meta: { profile: [profile.url] },
-        identifier: [{ system: 'http://example.com/patient-id', value: 'foo' }],
-        name: [{ given: ['Alex'], family: 'Baker' }],
-        gender: 'male',
-      };
-
-      // Create the patient
-      // This should succeed
-      await expect(repo.createResource(patient)).resolves.toBeTruthy();
-
-      // Now update the profile to make "address" a required field
-      await repo.updateResource<StructureDefinition>({
-        ...profile,
-        snapshot: {
-          ...profile.snapshot,
-          element: profile.snapshot?.element?.map((e) => {
-            if (e.path === 'Patient.address') {
-              return {
-                ...e,
-                min: 1,
-              };
-            }
-            return e;
-          }) as ElementDefinition[],
-        },
-      });
-
-      // Now try to create another patient without an address
-      // This should fail
-      await expect(repo.createResource(patient)).rejects.toThrow(
-        new Error('Missing required property (Patient.address)')
-      );
-    }));
-
-  describe('Update resource with terminology validation', () => {
-    const patient: Patient = {
-      resourceType: 'Patient',
-      identifier: [{ use: 'usual', system: 'urn:oid:1.2.36.146.595.217.0.1', value: '12345' }],
-      active: true,
-      name: [
-        { use: 'official', family: 'Chalmers', given: ['Peter', 'James'] },
-        { use: 'usual', given: ['Jim'] },
-        { use: 'maiden', family: 'Windsor', given: ['Peter', 'James'] },
-      ],
-      telecom: [
-        { use: 'home', system: 'url', value: 'http://example.com' },
-        { system: 'phone', value: '(03) 5555 6473', use: 'work', rank: 1 },
-        { system: 'phone', value: '(03) 3410 5613', use: 'mobile', rank: 2 },
-        { system: 'phone', value: '(03) 5555 8834', use: 'old' },
-      ],
-      gender: 'male',
-      birthDate: '1974-12-25',
-      address: [{ use: 'home', type: 'both', text: '534 Erewhon St PeasantVille, Rainbow, Vic  3999' }],
-      contact: [
-        {
-          name: { use: 'usual', family: 'du Marché', given: ['Bénédicte'] },
-          telecom: [{ system: 'phone', value: '+33 (237) 998327', use: 'home' }],
-          address: { use: 'home', type: 'both', line: ['534 Erewhon St'], city: 'PleasantVille', postalCode: '3999' },
-          gender: 'female',
-        },
-      ],
-      communication: [{ language: { coding: [{ system: 'urn:ietf:bcp:47', code: 'en' }] } }],
-    };
-
-    let repo: Repository;
-    let profile: StructureDefinition;
-    beforeAll(async () => {
-      const result = await createTestProject({ withRepo: { validateTerminology: true } });
-      repo = result.repo;
-
-      // Create modified US Core Patient profile to have 'required' binding for communication.language
-      const modifiedPatientProfile = JSON.parse(
-        readFileSync(resolve(__dirname, '__test__/us-core-patient.json'), 'utf8')
-      ) as StructureDefinition;
-
-      const commLang = modifiedPatientProfile.snapshot?.element.find((e) => e.id === 'Patient.communication.language');
-      assert(commLang?.binding?.valueSet === 'http://hl7.org/fhir/us/core/ValueSet/simple-language');
-      assert(commLang.binding.strength === 'extensible');
-      commLang.binding.strength = 'required';
-
-      profile = await repo.createResource<StructureDefinition>({
-        ...modifiedPatientProfile,
-        url: 'urn:uuid:' + randomUUID(),
-      });
-
-      // Create a ValueSet for the US Core Patient profile that includes only 'en' as a valid language
-      await repo.createResource<ValueSet>({
-        resourceType: 'ValueSet',
-        url: 'http://hl7.org/fhir/us/core/ValueSet/simple-language',
-        expansion: {
-          timestamp: new Date().toISOString(),
-          contains: [
-            {
-              system: 'urn:ietf:bcp:47',
-              code: 'en',
-            },
-          ],
-        },
-        status: 'active',
-      });
-    });
-    test('Valid patient without any profiles', async () =>
-      withTestContext(async () => {
-        await expect(repo.createResource(patient)).resolves.toBeDefined();
-      }));
-
-    test('Invalid gender', async () =>
-      withTestContext(async () => {
-        await expect(
-          repo.createResource({ ...patient, gender: 'enby' as unknown as Patient['gender'] })
-        ).rejects.toThrow(
-          `Value "enby" did not satisfy terminology binding http://hl7.org/fhir/ValueSet/administrative-gender|4.0.1 (Patient.gender)`
-        );
-      }));
-
-    test('Valid patient with US Core Patient profile', async () =>
-      withTestContext(async () => {
-        await expect(repo.createResource({ ...patient, meta: { profile: [profile.url] } })).resolves.toBeDefined();
-      }));
-
-    test.failing(
-      '[FAILING] Invalid patient with US Core Patient profile (communication.language not in ValueSet)',
-      async () =>
-        withTestContext(async () => {
-          await expect(
-            repo.createResource({
-              ...patient,
-              meta: { profile: [profile.url] },
-              communication: [{ language: { coding: [{ system: 'urn:ietf:bcp:47', code: 'fr' }] } }],
-            })
-          ).rejects.toThrow(
-            `Value "fr" did not satisfy terminology binding http://hl7.org/fhir/us/core/ValueSet/simple-language`
-          );
-        })
-    );
   });
 
   test('Conditional update', () =>
@@ -1193,92 +1469,6 @@ describe('FHIR Repo', () => {
       await expect(systemRepo.deleteResource(patient.resourceType, patient.id)).resolves.toBeUndefined();
     }));
 
-  describe('Array column padding', () => {
-    let prevConfig: string | undefined;
-    beforeEach(() => {
-      const config = getConfig();
-      prevConfig = config.arrayColumnPadding && JSON.stringify(config.arrayColumnPadding);
-    });
-
-    afterEach(() => {
-      if (prevConfig) {
-        const config = getConfig();
-        config.arrayColumnPadding = JSON.parse(prevConfig);
-      }
-    });
-
-    test.each([
-      ['no config', undefined, false], // off by default
-      [
-        'no resourceType array',
-        {
-          config: {
-            // ensure a padding element is chosen
-            m: 1,
-            lambda: 300,
-            statisticsTarget: 1,
-          },
-        },
-        true,
-      ],
-      [
-        'resourceType in the resourceType array',
-        {
-          resourceType: ['Patient', 'Observation'],
-          config: {
-            m: 1,
-            lambda: 300,
-            statisticsTarget: 1,
-          },
-        },
-        true,
-      ],
-      [
-        'resourceType NOT in the resourceType array',
-        {
-          resourceType: ['Patient'],
-          config: {
-            m: 1,
-            lambda: 300,
-            statisticsTarget: 1,
-          },
-        },
-        false,
-      ],
-    ])('with %s', async (desc, identifierArrayColumnPadding, shouldPad) =>
-      withTestContext(async () => {
-        const config = getConfig();
-        if (identifierArrayColumnPadding) {
-          config.arrayColumnPadding = {
-            identifier: identifierArrayColumnPadding,
-          };
-        }
-        const res = await systemRepo.createResource<Observation>({
-          resourceType: 'Observation',
-          status: 'unknown',
-          code: { coding: [{ system: 'http://loinc.org', code: '72166-2', display: 'Test Observation' }] },
-        });
-
-        const db = getDatabasePool(DatabaseMode.READER);
-        const results = await db.query('SELECT "__identifier" FROM "Observation" WHERE "id" = $1', [res.id]);
-        if (shouldPad) {
-          expect(results.rows).toStrictEqual([{ __identifier: ['00000000-0000-0000-0000-000000000000'] }]);
-        } else {
-          expect(results.rows).toStrictEqual([{ __identifier: [] }]);
-        }
-
-        // deleted rows also get padded
-        await systemRepo.deleteResource(res.resourceType, res.id);
-
-        if (shouldPad) {
-          expect(results.rows).toStrictEqual([{ __identifier: ['00000000-0000-0000-0000-000000000000'] }]);
-        } else {
-          expect(results.rows).toStrictEqual([{ __identifier: [] }]);
-        }
-      })
-    );
-  });
-
   test('Conditional reference resolution', async () =>
     withTestContext(async () => {
       const practitionerIdentifier = randomUUID();
@@ -1311,7 +1501,7 @@ describe('FHIR Repo', () => {
           { reference: 'Practitioner?identifier=http://hl7.org.fhir/sid/us-npi|' + practitionerIdentifier },
         ],
       };
-      await expect(systemRepo.createResource<Patient>(patient)).rejects.toThrow(/did not match any resources/);
+      await expect(systemRepo.createResource(patient)).rejects.toThrow(/did not match any resources/);
     }));
 
   test('Conditional reference resolution multiple matches', async () =>
@@ -1332,7 +1522,7 @@ describe('FHIR Repo', () => {
           { reference: 'Practitioner?identifier=http://hl7.org.fhir/sid/us-npi|' + practitionerIdentifier },
         ],
       };
-      await expect(systemRepo.createResource<Patient>(patient)).rejects.toThrow();
+      await expect(systemRepo.createResource(patient)).rejects.toThrow();
     }));
 
   test('Conditional reference replaced before validation', async () =>
@@ -1342,7 +1532,7 @@ describe('FHIR Repo', () => {
         resourceType: 'Patient',
         identifier: [{ value: mrn }],
       };
-      await systemRepo.createResource<Patient>(patient);
+      await systemRepo.createResource(patient);
 
       const serviceRequest = {
         resourceType: 'ServiceRequest',
@@ -1377,40 +1567,6 @@ describe('FHIR Repo', () => {
       await expect(systemRepo.createResource(serviceRequest)).rejects.toThrow(/^Expected single .*?performerType\)$/);
     }));
 
-  test('Project default profiles', async () =>
-    withTestContext(async () => {
-      const { repo } = await createTestProject({
-        withClient: true,
-        withRepo: true,
-        project: {
-          defaultProfile: [
-            { resourceType: 'Observation', profile: ['http://hl7.org/fhir/StructureDefinition/vitalsigns'] },
-          ],
-        },
-      });
-
-      const observation: Observation = {
-        resourceType: 'Observation',
-        status: 'final',
-        category: [
-          { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/observation-category', code: 'vital-signs' }] },
-        ],
-        code: { text: 'Strep test' },
-        effectiveDateTime: '2024-02-13T14:34:56Z',
-        valueBoolean: true,
-      };
-
-      await expect(systemRepo.createResource(observation)).resolves.toBeDefined();
-      await expect(repo.createResource(observation)).rejects.toThrow('Missing required property (Observation.subject)');
-
-      observation.subject = { identifier: { value: randomUUID() } };
-      await expect(repo.createResource(observation)).resolves.toMatchObject<Partial<Observation>>({
-        meta: expect.objectContaining({
-          profile: ['http://hl7.org/fhir/StructureDefinition/vitalsigns'],
-        }),
-      });
-    }));
-
   test('Prevents setting Project compartments', async () =>
     withTestContext(async () => {
       const { repo, project } = await createTestProject({ withRepo: true });
@@ -1428,33 +1584,15 @@ describe('FHIR Repo', () => {
       expect(results).toHaveLength(0);
     }));
 
-  test('setTypedValue', () => {
-    const patient: Patient = {
-      resourceType: 'Patient',
-      photo: [
-        {
-          contentType: 'image/png',
-          url: 'https://example.com/photo.png',
-        },
-        {
-          contentType: 'image/png',
-          data: 'base64data',
-        },
-      ],
-    };
-
-    setTypedPropertyValue(toTypedValue(patient), 'photo[1].contentType', { type: 'string', value: 'image/jpeg' });
-    expect(patient.photo?.[1].contentType).toStrictEqual('image/jpeg');
-  });
   async function getProjectIdColumn(id: string): Promise<string | null> {
     const projectIdQuery = new SelectQuery('User').column('projectId').where('id', '=', id);
-    const client = getSystemRepo().getDatabaseClient(DatabaseMode.WRITER);
+    const client = systemRepo.getDatabaseClient(DatabaseMode.WRITER);
     return (await projectIdQuery.execute(client))[0].projectId;
   }
 
   test('Super admin can edit User.meta.project', async () =>
     withTestContext(async () => {
-      const { project, repo } = await createTestProject({ withRepo: true });
+      const { project, repo } = await createTestProject({ withRepo: true, membership: { admin: true } });
 
       // Create a user in the project
       const user1 = await repo.createResource<User>({
@@ -1485,138 +1623,28 @@ describe('FHIR Repo', () => {
       expect(await getProjectIdColumn(user3.id)).toStrictEqual(systemResourceProjectId);
     }));
 
-  test('Handles caching of profile from linked project', async () =>
-    withTestContext(async () => {
-      const systemRepo = getSystemRepo();
-      const { membership, project } = await registerNew({
-        firstName: randomUUID(),
-        lastName: randomUUID(),
-        projectName: randomUUID(),
-        email: randomUUID() + '@example.com',
-        password: randomUUID(),
-      });
-
-      const { membership: membership2, project: project2 } = await registerNew({
-        firstName: randomUUID(),
-        lastName: randomUUID(),
-        projectName: randomUUID(),
-        email: randomUUID() + '@example.com',
-        password: randomUUID(),
-      });
-      const updatedProject = await systemRepo.updateResource({
-        ...project,
-        link: [{ project: createReference(project2) }],
-      });
-
-      const repo2 = await getRepoForLogin({
-        login: {} as Login,
-        membership: membership2,
-        project: project2,
-        userConfig: {} as UserConfiguration,
-      });
-      const profile = await repo2.createResource({ ...usCorePatientProfile, url: 'urn:uuid:' + randomUUID() });
-
-      const patientJson: Patient = {
-        resourceType: 'Patient',
-        meta: {
-          profile: [profile.url],
-        },
-      };
-
-      // Resource upload should fail with profile linked
-      let repo = await getRepoForLogin({
-        login: {} as Login,
-        membership,
-        project: updatedProject,
-        userConfig: {} as UserConfiguration,
-      });
-      await expect(repo.createResource(patientJson)).rejects.toThrow(/Missing required property/);
-
-      // Unlink Project and verify that profile is not cached; resource upload should succeed without access to profile
-      const unlinkedProject = await systemRepo.updateResource({
-        ...updatedProject,
-        link: undefined,
-      });
-      repo = await getRepoForLogin({
-        login: {} as Login,
-        membership,
-        project: unlinkedProject,
-        userConfig: {} as UserConfiguration,
-      });
-      await expect(repo.createResource(patientJson)).resolves.toBeDefined();
-    }));
-
-  test('Patch post-commit stores full resource in cache', async () =>
-    withTestContext(async () => {
-      const { project, repo, login, membership } = await createTestProject({
-        withRepo: { extendedMode: false },
-        withAccessToken: true,
-        withClient: true,
-      });
-      const extendedRepo = await getRepoForLogin(
-        { login, project, membership, userConfig: {} as UserConfiguration },
-        true
-      );
-
-      const patient = await repo.createResource<Patient>({ resourceType: 'Patient' });
-      expect(patient.meta?.project).toBeUndefined();
-      expect(patient.gender).toBeUndefined();
-
-      const updatedPatient = await repo.patchResource<Patient>('Patient', patient.id, [
-        { op: 'add', path: '/gender', value: 'unknown' },
-      ]);
-      expect(updatedPatient.meta?.project).toBeUndefined();
-      expect(updatedPatient.gender).toStrictEqual('unknown');
-
-      const cachedPatient = await extendedRepo.readResource<Patient>('Patient', patient.id);
-      expect(cachedPatient.meta?.project).toStrictEqual(project.id);
-      expect(cachedPatient.gender).toStrictEqual('unknown');
-    }));
-
-  test.each(['commit', 'rollback'])('Post-commit handling on %s', async (mode) => {
-    const repo = getSystemRepo();
-    const loggerErrorSpy = jest.spyOn(getLogger(), 'error').mockImplementation(() => {});
-    const finalPostCommit = jest.fn();
-
-    const error = new Error('Post-commit hook failed');
-    const promise = repo.withTransaction(async () => {
-      await repo.postCommit(async () => {
-        throw new Error('Post-commit hook failed');
-      });
-      await repo.postCommit(async () => {
-        // eslint-disable-next-line no-throw-literal
-        throw 'Post-commit hook failed with string';
-      });
-      await repo.postCommit(finalPostCommit);
-      if (mode === 'rollback') {
-        throw new Error('Transaction failed');
-      }
+  test('Async quota delay is applied after transaction commit', async () => {
+    const { repo, project, client, login, membership } = await createTestProject({
+      withRepo: true,
+      withClient: true,
+      withAccessToken: true,
     });
+    const userConfig: UserConfiguration = { resourceType: 'UserConfiguration' };
 
-    if (mode === 'commit') {
-      await promise;
-      expect(finalPostCommit).toHaveBeenCalled();
-      expect(loggerErrorSpy).toHaveBeenCalledTimes(2);
-      expect(loggerErrorSpy).toHaveBeenCalledWith(expect.any(String), error);
-      expect(loggerErrorSpy).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          err: 'Post-commit hook failed with string',
-        })
-      );
-    } else {
-      await expect(promise).rejects.toThrow('Transaction failed');
-      expect(finalPostCommit).not.toHaveBeenCalled();
-      expect(loggerErrorSpy).toHaveBeenCalledTimes(1);
-      expect(loggerErrorSpy).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          error: 'Transaction failed',
-        })
-      );
-    }
-
-    loggerErrorSpy.mockRestore();
+    await runInAuthenticatedContext(
+      { project, profile: client, login, membership, userConfig },
+      undefined,
+      undefined,
+      { async: true },
+      async () => {
+        const startTime = Date.now();
+        await repo.withTransaction(async (txRepo) => {
+          await txRepo.createResource({ resourceType: 'Patient' });
+          expect(Date.now() - startTime).toBeLessThan(100);
+        });
+        expect(Date.now() - startTime).toBeGreaterThan(100);
+      }
+    );
   });
 
   test('Handles resources with many entries stored in lookup table', async () =>
@@ -1635,15 +1663,19 @@ describe('FHIR Repo', () => {
         patient.link?.push({ type: 'seealso', other: { reference: 'Patient/' + randomUUID() } });
       }
 
-      await repo.withTransaction(async (client) => {
-        const querySpy = jest.spyOn(client, 'query');
-        await repo.createResource<Patient>(patient);
+      let finishedTransaction = false;
+      await repo.withTransaction(async (txRepo) => {
+        const client = txRepo.getDatabaseClient(DatabaseMode.WRITER);
+        const querySpy = spyOnQuery(client);
+        await txRepo.createResource(patient);
         const calls = querySpy.mock.calls;
         expect(calls.filter((c) => c[0].includes('INSERT INTO "Patient"'))).toHaveLength(1);
         expect(calls.filter((c) => c[0].includes('INSERT INTO "Patient_History"'))).toHaveLength(1);
         expect(calls.filter((c) => c[0].includes('INSERT INTO "Patient_References"')).length).toBeGreaterThanOrEqual(2);
         querySpy.mockRestore();
+        finishedTransaction = true;
       });
+      expect(finishedTransaction).toBe(true);
     }));
 
   test('__version column', async () => {
@@ -1717,30 +1749,13 @@ describe('FHIR Repo', () => {
         withRepo: true,
       });
 
-      const regRequest: RegisterRequest = {
-        firstName: randomUUID(),
-        lastName: randomUUID(),
-        projectName: randomUUID(),
-        email: randomUUID() + '@example.com',
-        password: randomUUID(),
-      };
-
-      const regResult = await registerNew(regRequest);
-      let project = regResult.project;
-
-      // add linkedProject to `Project.link`
-      project = await getSystemRepo().updateResource({
-        ...project,
-        link: [{ project: createReference(linkedProject) }],
+      const { project, repo } = await createTestProject({
+        project: { link: [{ project: createReference(linkedProject) }] },
+        membership: { admin: true },
+        withRepo: true,
       });
 
-      const repo = await getRepoForLogin({
-        project,
-        membership: regResult.membership,
-        login: regResult.login,
-        userConfig: {} as UserConfiguration,
-      });
-
+      // Creating via linkedRepo warms the Redis cache for this resource.
       const linkedOrg = await linkedRepo.createResource<Organization>({
         resourceType: 'Organization',
         name: 'Linked Organization',
@@ -1777,38 +1792,62 @@ describe('FHIR Repo', () => {
       expect(orgs.length).toStrictEqual(2);
       expect(orgs.map((p) => p.id)).toContain(org.id);
       expect(orgs.map((p) => p.id)).toContain(linkedOrg.id);
+
+      // Regression: a non-exported resource in a linked project should not be
+      // readable even when it is present in the Redis cache. Previously,
+      // canPerformInteraction only checked project-compartment membership and
+      // ignored the linked project's `exportedResourceType`, so the cache path
+      // bypassed the filter enforced by addProjectFilters in SQL.
+
+      // Exported type: should still be readable from the linked project.
+      const readOrg = await repo.readResource<Organization>('Organization', linkedOrg.id);
+      expect(readOrg.id).toStrictEqual(linkedOrg.id);
+
+      // Non-exported type: must not be readable even with a cache hit.
+      await expect(repo.readResource<Patient>('Patient', linkedPatient.id)).rejects.toThrow(
+        new OperationOutcomeError(notFound)
+      );
     }));
 
-  test('Binary writes no search parameter columns', () =>
+  test('Project.exportedResourceType allows resources in primary project', () =>
     withTestContext(async () => {
-      const { project, repo } = await createTestProject({ withClient: true, withRepo: true });
-      const buildResourceRowSpy = jest.spyOn(Repository.prototype as any, 'buildResourceRow');
-      const binary = await repo.createResource<Binary>({
-        resourceType: 'Binary',
-        contentType: ContentType.TEXT,
-        data: encodeBase64('this is some test data'),
-        meta: {
-          tag: [{ system: 'https://example.com', code: 'tag' }],
-          security: [{ system: 'https://example.com', code: 'security' }],
-        },
-      });
-      expect(binary).toBeDefined();
-      expect(binary.id).toBeDefined();
-
-      expect(buildResourceRowSpy).toHaveBeenCalledTimes(1);
-      const binaryRow = buildResourceRowSpy.mock.results[0].value as Record<string, any>;
-
-      expect(binaryRow).toStrictEqual({
-        id: binary.id,
-        lastUpdated: expect.any(String),
-        deleted: false,
-        projectId: project.id,
-        content: expect.any(String),
-        __version: Repository.VERSION,
+      // Sanity check: exportedResourceType on the *primary* project is not
+      // used to filter access to the owner's own resources.
+      const { repo } = await createTestProject({
+        project: { exportedResourceType: ['Organization'] },
+        withRepo: true,
       });
 
-      buildResourceRowSpy.mockRestore();
+      const patient = await repo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: ['Primary'], family: 'Patient' }],
+      });
+
+      const readPatient = await repo.readResource<Patient>('Patient', patient.id);
+      expect(readPatient.id).toStrictEqual(patient.id);
     }));
+
+  test('constructor and clone add the synthetic R4 project only once to shared context', () => {
+    const project: WithId<Project> = {
+      resourceType: 'Project',
+      id: randomUUID(),
+    };
+    const context = {
+      projects: [project],
+      author: {
+        reference: 'Practitioner/' + randomUUID(),
+      },
+    };
+
+    const repo = new Repository(context);
+    const clonedRepo = repo.clone();
+
+    // Repository construction mutates the shared context in place, but repeated
+    // construction from that context must not append duplicate synthetic projects.
+    expect(context.projects.map((p) => p.id)).toStrictEqual([project.id, r4ProjectId]);
+    expect(repo.getConfig().projects?.filter((p) => p.id === r4ProjectId)).toHaveLength(1);
+    expect(clonedRepo.getConfig().projects?.filter((p) => p.id === r4ProjectId)).toHaveLength(1);
+  });
 });
 
 function shuffleString(s: string): string {

@@ -1,6 +1,9 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { ContentType, created, MedplumClient } from '@medplum/core';
+import type * as NodeStream from 'node:stream';
+import { ReadableStream } from 'node:stream/web';
+import type { Mock } from 'vitest';
 import { main } from '.';
 import { createMedplumClient } from './util/client';
 import { getUnsupportedExtension } from './utils';
@@ -12,12 +15,12 @@ const testLineOutput = [
   `{"resourceType":"ExplanationOfBenefit", "id":"1111111", "item":[{"sequence": 1}]}`, // EOB with missing provider and item.productOrService
   `{"resourceType":"ExplanationOfBenefit", "id":"2222222", "provider": "someprovider", "item":[{"sequence": 1, "productOrService": "someproduct"}]}`,
 ];
-jest.mock('./util/client');
-jest.mock('node:child_process');
-jest.mock('node:http');
-jest.mock('node:readline', () => ({
-  createInterface: jest.fn().mockReturnValue({
-    [Symbol.asyncIterator]: jest.fn(function* () {
+vi.mock('./util/client');
+vi.mock('node:child_process');
+vi.mock('node:http');
+vi.mock('node:readline', () => ({
+  createInterface: vi.fn().mockReturnValue({
+    [Symbol.asyncIterator]: vi.fn(function* () {
       for (const line of testLineOutput) {
         yield line;
       }
@@ -25,21 +28,32 @@ jest.mock('node:readline', () => ({
   }),
 }));
 
-jest.mock('node:fs', () => ({
-  createReadStream: jest.fn(),
-  existsSync: jest.fn(),
-  readFileSync: jest.fn(),
-  writeFileSync: jest.fn(),
-  writeFile: jest.fn((path, data, callback) => {
-    callback();
-  }),
-  constants: {
-    O_CREAT: 0,
-  },
-  promises: {
-    readFile: jest.fn(async () => '{}'),
-  },
-}));
+vi.mock('node:fs', async () => {
+  const actualStream = await vi.importActual<typeof NodeStream>('node:stream');
+  const { PassThrough } = actualStream;
+  const writtenChunks: Buffer[] = [];
+  const mock = {
+    createReadStream: vi.fn(),
+    createWriteStream: vi.fn().mockImplementation(() => {
+      const stream = new PassThrough();
+      stream.on('data', (chunk: Buffer) => writtenChunks.push(Buffer.from(chunk)));
+      return stream;
+    }),
+    existsSync: vi.fn(),
+    readFileSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    writeFile: vi.fn((path, data, callback) => {
+      callback();
+    }),
+    constants: {
+      O_CREAT: 0,
+    },
+    promises: {
+      readFile: vi.fn(async () => '{}'),
+    },
+  };
+  return { default: mock, ...mock };
+});
 
 let medplum: MedplumClient;
 
@@ -49,7 +63,7 @@ describe('CLI Bulk Commands', () => {
 
     beforeEach(() => {
       let count = 0;
-      fetch = jest.fn(async (url) => {
+      fetch = vi.fn(async (url) => {
         if (url.includes('/$export?_since=200')) {
           return {
             status: 200,
@@ -60,7 +74,7 @@ describe('CLI Bulk Commands', () => {
                 }[name];
               },
             },
-            json: jest.fn(async () => {
+            json: vi.fn(async () => {
               return {
                 resourceType: 'OperationOutcome',
                 id: 'accepted',
@@ -81,7 +95,7 @@ describe('CLI Bulk Commands', () => {
         if (url.includes('/$export')) {
           return {
             status: 202,
-            json: jest.fn(async () => {
+            json: vi.fn(async () => {
               return {
                 resourceType: 'OperationOutcome',
                 id: 'accepted',
@@ -119,7 +133,7 @@ describe('CLI Bulk Commands', () => {
                   }[name];
                 },
               },
-              json: jest.fn(async () => {
+              json: vi.fn(async () => {
                 return {};
               }),
             };
@@ -135,7 +149,7 @@ describe('CLI Bulk Commands', () => {
               }[name];
             },
           },
-          json: jest.fn(async () => ({
+          json: vi.fn(async () => ({
             transactionTime: '2023-05-18T22:55:31.280Z',
             request: 'https://api.medplum.com/fhir/R4/$export?_type=Observation',
             requiresAccessToken: false,
@@ -153,23 +167,30 @@ describe('CLI Bulk Commands', () => {
           })),
         };
       });
-      jest.resetModules();
-      jest.clearAllMocks();
+      vi.resetModules();
+      vi.clearAllMocks();
       medplum = new MedplumClient({ fetch });
 
-      (createMedplumClient as unknown as jest.Mock).mockImplementation(async () => medplum);
+      (createMedplumClient as unknown as Mock).mockImplementation(async () => medplum);
 
-      console.log = jest.fn();
-      console.error = jest.fn();
-      process.exit = jest.fn() as never;
+      console.log = vi.fn();
+      console.error = vi.fn();
+      process.exit = vi.fn() as never;
     });
 
     test('system', async () => {
-      const medplumDownloadSpy = jest.spyOn(medplum, 'download').mockImplementation((): any => {
-        return {
-          text: jest.fn(),
-        };
-      });
+      const medplumDownloadSpy = vi.spyOn(medplum, 'downloadResponse').mockImplementation(
+        async (): Promise<Response> =>
+          ({
+            ok: true,
+            body: new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('download data'));
+                controller.close();
+              },
+            }),
+          }) as Response
+      );
       await main(['node', 'index.js', 'bulk', 'export', '-t', 'Patient']);
       expect(medplumDownloadSpy).toHaveBeenCalled();
       expect(console.log).toHaveBeenCalledWith(
@@ -183,11 +204,18 @@ describe('CLI Bulk Commands', () => {
     });
 
     test('with --target-directory', async () => {
-      const medplumDownloadSpy = jest.spyOn(medplum, 'download').mockImplementation((): any => {
-        return {
-          text: jest.fn(),
-        };
-      });
+      const medplumDownloadSpy = vi.spyOn(medplum, 'downloadResponse').mockImplementation(
+        async (): Promise<Response> =>
+          ({
+            ok: true,
+            body: new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('download data'));
+                controller.close();
+              },
+            }),
+          }) as Response
+      );
       const testDirectory = 'testtargetdirectory';
       await main(['node', 'index.js', 'bulk', 'export', '-t', 'Patient', '--target-directory', testDirectory]);
       expect(medplumDownloadSpy).toHaveBeenCalled();
@@ -199,11 +227,11 @@ describe('CLI Bulk Commands', () => {
     let fetch: any;
 
     beforeEach(() => {
-      console.log = jest.fn();
-      console.error = jest.fn();
-      jest.resetModules();
-      jest.clearAllMocks();
-      fetch = jest.fn(async () => {
+      console.log = vi.fn();
+      console.error = vi.fn();
+      vi.resetModules();
+      vi.clearAllMocks();
+      fetch = vi.fn(async () => {
         return {
           status: 200,
           headers: {
@@ -213,7 +241,7 @@ describe('CLI Bulk Commands', () => {
               }[name];
             },
           },
-          json: jest.fn(async () => ({
+          json: vi.fn(async () => ({
             resourceType: 'Bundle',
             type: 'transaction-response',
             entry: [
@@ -231,7 +259,7 @@ describe('CLI Bulk Commands', () => {
         };
       });
       medplum = new MedplumClient({ fetch });
-      (createMedplumClient as unknown as jest.Mock).mockImplementation(async () => medplum);
+      (createMedplumClient as unknown as Mock).mockImplementation(async () => medplum);
     });
 
     test('success', async () => {

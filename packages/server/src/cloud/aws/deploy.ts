@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { GetFunctionConfigurationCommandOutput } from '@aws-sdk/client-lambda';
+import type { GetFunctionConfigurationCommandOutput, LambdaClient } from '@aws-sdk/client-lambda';
 import {
   CreateFunctionCommand,
+  DeleteFunctionCommand,
   GetFunctionCommand,
   GetFunctionConfigurationCommand,
-  LambdaClient,
   ListLayerVersionsCommand,
   PackageType,
   ResourceConflictException,
@@ -13,13 +13,14 @@ import {
   UpdateFunctionCodeCommand,
   UpdateFunctionConfigurationCommand,
 } from '@aws-sdk/client-lambda';
-import { sleep } from '@medplum/core';
+import { normalizeErrorString, sleep } from '@medplum/core';
 import type { Bot } from '@medplum/fhirtypes';
-import { ConfiguredRetryStrategy } from '@smithy/util-retry';
 import JSZip from 'jszip';
 import { getJsFileExtension } from '../../bots/utils';
 import { getConfig } from '../../config/loader';
-import { getLogger } from '../../logger';
+import { getAuthenticatedContext } from '../../context';
+import { getLogger, globalLogger } from '../../logger';
+import { deleteOldLambdaVersions, getBotManagementLambdaClient } from './lambda';
 
 export const LAMBDA_RUNTIME = 'nodejs22.x';
 export const LAMBDA_HANDLER = 'index.handler';
@@ -27,55 +28,21 @@ export const LAMBDA_MEMORY = 1024;
 export const DEFAULT_LAMBDA_TIMEOUT = 10;
 export const MAX_LAMBDA_TIMEOUT = 900; // 60 * 15 (15 mins)
 
-const CJS_PREFIX = `const { ContentType, Hl7Message, MedplumClient } = require("@medplum/core");
+const CJS_PREFIX = `const { ContentType, Hl7Message, MedplumClient, OperationOutcomeError, isOperationOutcome, normalizeOperationOutcome } = require("@medplum/core");
 const PdfPrinter = require("pdfmake");
 const userCode = require("./user.cjs");
 
 exports.handler = async (event, context) => {
 `;
 
-const ESM_PREFIX = `import { ContentType, Hl7Message, MedplumClient } from '@medplum/core';
+const ESM_PREFIX = `import { ContentType, Hl7Message, MedplumClient, OperationOutcomeError, isOperationOutcome, normalizeOperationOutcome } from '@medplum/core';
 import PdfPrinter from 'pdfmake';
 import * as userCode from './user.mjs';
 
 export const handler = async (event, context) => {
 `;
 
-const WRAPPER_CODE = `
-  const { bot, baseUrl, accessToken, requester, contentType, secrets, traceId, headers } = event;
-  const medplum = new MedplumClient({
-    baseUrl,
-    fetch: function(url, options = {}) {
-      options.headers ||= {};
-      options.headers['X-Trace-Id'] = traceId;
-      options.headers['traceparent'] = traceId;
-      return fetch(url, options);
-    },
-    createPdf,
-  });
-  medplum.setAccessToken(accessToken);
-  try {
-    let input = event.input;
-    if (contentType === ContentType.HL7_V2 && input) {
-      input = Hl7Message.parse(input);
-    }
-    let result = await userCode.handler(medplum, { bot, requester, input, contentType, secrets, traceId, headers });
-    if (contentType === ContentType.HL7_V2 && result) {
-      result = result.toString();
-    }
-    return result;
-  } catch (err) {
-    if (err instanceof Error) {
-      console.log("Unhandled error: " + err.message + "\\n" + err.stack);
-    } else if (typeof err === "object") {
-      console.log("Unhandled error: " + JSON.stringify(err, undefined, 2));
-    } else {
-      console.log("Unhandled error: " + err);
-    }
-    throw err;
-  }
-}
-
+export const CREATE_PDF_CODE = `
 function createPdf(docDefinition, tableLayouts, fonts) {
   if (!fonts) {
     fonts = {
@@ -108,24 +75,56 @@ function createPdf(docDefinition, tableLayouts, fonts) {
 }
 `;
 
+const WRAPPER_CODE =
+  `
+  const { bot, baseUrl, accessToken, requester, contentType, secrets, traceId, headers } = event;
+  const medplum = new MedplumClient({
+    baseUrl,
+    fetch: function(url, options = {}) {
+      options.headers ||= {};
+      options.headers['X-Trace-Id'] = traceId;
+      options.headers['traceparent'] = traceId;
+      return fetch(url, options);
+    },
+    createPdf,
+  });
+  medplum.setAccessToken(accessToken);
+  try {
+    let input = event.input;
+    if (contentType === ContentType.HL7_V2 && input) {
+      input = Hl7Message.parse(input);
+    }
+    let result = await userCode.handler(medplum, { bot, requester, input, contentType, secrets, traceId, headers });
+    if (contentType === ContentType.HL7_V2 && result) {
+      result = result.toString();
+    }
+    return result;
+  } catch (err) {
+    if (err instanceof OperationOutcomeError || isOperationOutcome(err)) {
+      return normalizeOperationOutcome(err);
+    }
+
+    if (err instanceof Error) {
+      console.log("Unhandled error: " + err.message + "\\n" + err.stack);
+    } else if (typeof err === "object") {
+      console.log("Unhandled error: " + JSON.stringify(err, undefined, 2));
+    } else {
+      console.log("Unhandled error: " + err);
+    }
+    throw err;
+  }
+}
+` + CREATE_PDF_CODE;
+
 export function getLambdaNameForBot(bot: Bot): string {
   return `medplum-bot-lambda-${bot.id}`;
 }
 
+export const LAMBDA_NAME_REGEX_PATTERN =
+  '^medplum-bot-lambda-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+
 export async function getLambdaTimeoutForBot(bot: Bot): Promise<number> {
-  // Create a new AWS Lambda client
-  // Use a custom retry strategy to avoid throttling errors
-  // This is especially important when updating lambdas which also
-  // involve upgrading the layer version.
-
-  const client = new LambdaClient({
-    region: getConfig().awsRegion,
-    retryStrategy: new ConfiguredRetryStrategy(
-      5, // max attempts
-      (attempt: number) => 500 * 2 ** attempt // Exponential backoff
-    ),
-  });
-
+  const client = getBotManagementLambdaClient();
   const name = getLambdaNameForBot(bot);
   let timeout: number;
   try {
@@ -143,46 +142,62 @@ export async function getLambdaTimeoutForBot(bot: Bot): Promise<number> {
 }
 
 export async function deployLambda(bot: Bot, code: string): Promise<void> {
+  return deployLambdaInternal(bot, code, createZipFile, '');
+}
+
+export async function deployLambdaInternal(
+  bot: Bot,
+  code: string,
+  createZipFileFn: (bot: Bot, code: string) => Promise<Uint8Array>,
+  logLabel: string
+): Promise<void> {
   const log = getLogger();
+  const label = logLabel ? ` ${logLabel}` : '';
 
   if (bot.timeout !== undefined && bot.timeout > MAX_LAMBDA_TIMEOUT) {
     throw new Error('Bot timeout exceeds allowed maximum of 900 seconds');
   }
 
-  // Create a new AWS Lambda client
-  // Use a custom retry strategy to avoid throttling errors
-  // This is especially important when updating lambdas which also
-  // involve upgrading the layer version.
-  const client = new LambdaClient({
-    region: getConfig().awsRegion,
-    retryStrategy: new ConfiguredRetryStrategy(
-      5, // max attempts
-      (attempt: number) => 500 * 2 ** attempt // Exponential backoff
-    ),
-  });
-
+  const client = getBotManagementLambdaClient();
   const name = getLambdaNameForBot(bot);
-  log.info('Deploying lambda function for bot', { name });
-  const zipFile = await createZipFile(bot, code);
-  log.debug('Lambda function zip size', { bytes: zipFile.byteLength });
+  log.info(`Deploying lambda${label} function for bot`, { name });
+  const zipFile = await createZipFileFn(bot, code);
+  log.debug(`Lambda${label} function zip size`, { bytes: zipFile.byteLength });
 
-  const exists = await lambdaExists(client, name);
-  if (!exists) {
-    await createLambda(bot, client, name, zipFile);
-  } else {
+  if (await lambdaExists(client, name)) {
     await updateLambda(bot, client, name, zipFile);
+    const { project } = getAuthenticatedContext();
+    // Don't block on delete since this could take a while
+    deleteOldLambdaVersions(client, name, { dryRun: false }).catch((err) => {
+      globalLogger.error('Error occurred while deleting old Lambdas', {
+        projectId: project.id,
+        name,
+        err: normalizeErrorString(err),
+      });
+    });
+  } else {
+    await createLambda(bot, client, name, zipFile);
   }
 }
 
 async function createZipFile(bot: Bot, code: string): Promise<Uint8Array> {
+  return createBotZipFile(bot, code, CJS_PREFIX + WRAPPER_CODE, ESM_PREFIX + WRAPPER_CODE);
+}
+
+export async function createBotZipFile(
+  bot: Bot,
+  code: string,
+  cjsContent: string,
+  esmContent: string
+): Promise<Uint8Array> {
   const ext = getJsFileExtension(bot, code);
   const zip = new JSZip();
   if (ext === '.mjs') {
-    zip.file(`user.mjs`, code);
-    zip.file('index.mjs', ESM_PREFIX + WRAPPER_CODE);
+    zip.file('user.mjs', code);
+    zip.file('index.mjs', esmContent);
   } else {
-    zip.file(`user.cjs`, code);
-    zip.file('index.cjs', CJS_PREFIX + WRAPPER_CODE);
+    zip.file('user.cjs', code);
+    zip.file('index.cjs', cjsContent);
   }
   return zip.generateAsync({ type: 'uint8array' });
 }
@@ -193,7 +208,7 @@ async function createZipFile(bot: Bot, code: string): Promise<Uint8Array> {
  * @param name - The bot name.
  * @returns True if the bot exists.
  */
-async function lambdaExists(client: LambdaClient, name: string): Promise<boolean> {
+export async function lambdaExists(client: LambdaClient, name: string): Promise<boolean> {
   try {
     const command = new GetFunctionCommand({ FunctionName: name });
     const response = await client.send(command);
@@ -207,13 +222,25 @@ async function lambdaExists(client: LambdaClient, name: string): Promise<boolean
 }
 
 /**
+ * Deletes the AWS Lambda for the bot name.
+ *
+ * Because no `Qualifier` is passed, AWS deletes the entire function — all versions and aliases.
+ *
+ * @param client - The AWS Lambda client.
+ * @param name - The bot name.
+ */
+export async function deleteLambda(client: LambdaClient, name: string): Promise<void> {
+  await client.send(new DeleteFunctionCommand({ FunctionName: name }));
+}
+
+/**
  * Creates a new AWS Lambda for the bot name.
  * @param bot - The Bot resource for this bot.
  * @param client - The AWS Lambda client.
  * @param name - The bot name.
  * @param zipFile - The zip file with the bot code.
  */
-async function createLambda(bot: Bot, client: LambdaClient, name: string, zipFile: Uint8Array): Promise<void> {
+export async function createLambda(bot: Bot, client: LambdaClient, name: string, zipFile: Uint8Array): Promise<void> {
   const layerVersion = await getLayerVersion(client);
 
   await client.send(
@@ -242,7 +269,7 @@ async function createLambda(bot: Bot, client: LambdaClient, name: string, zipFil
  * @param name - The bot name.
  * @param zipFile - The zip file with the bot code.
  */
-async function updateLambda(bot: Bot, client: LambdaClient, name: string, zipFile: Uint8Array): Promise<void> {
+export async function updateLambda(bot: Bot, client: LambdaClient, name: string, zipFile: Uint8Array): Promise<void> {
   // First, make sure the lambda configuration is up to date
   await updateLambdaConfig(bot, client, name);
 

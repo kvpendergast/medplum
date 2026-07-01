@@ -26,7 +26,7 @@ describe('GINIndexes', () => {
   }
 
   beforeEach(() => {
-    const fetch = jest.fn(async (url) => {
+    const fetch = vi.fn(async (url) => {
       let status: number | undefined;
       let body: any;
 
@@ -86,28 +86,28 @@ describe('GINIndexes', () => {
             }[name];
           },
         },
-        json: jest.fn(async () => body),
+        json: vi.fn(async () => body),
       };
     });
     medplum = new MedplumClient({ fetch });
-    jest.useFakeTimers();
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
   });
 
   afterEach(async () => {
     await act(async () => notifications.clean());
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      await vi.runOnlyPendingTimersAsync();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('GIN Indexes', async () => {
     setup();
     expect(screen.getByText('GIN index stats')).toBeInTheDocument();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -119,7 +119,7 @@ describe('GINIndexes', () => {
 
     // Wait for the drop down
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Press the down arrow

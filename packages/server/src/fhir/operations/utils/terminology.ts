@@ -10,11 +10,10 @@ import type {
   ValueSet,
   ValueSetComposeIncludeFilter,
 } from '@medplum/fhirtypes';
-import type { Pool, PoolClient } from 'pg';
 import { r4ProjectId } from '../../../constants';
 import type { Repository } from '../../repo';
-import { getSystemRepo } from '../../repo';
-import { Column, Condition, Conjunction, Disjunction, SelectQuery, SqlFunction, Union } from '../../sql';
+import type { PgQueryable } from '../../sql';
+import { Column, Condition, Conjunction, Disjunction, Negation, SelectQuery, SqlFunction, Union } from '../../sql';
 
 export const parentProperty = 'http://hl7.org/fhir/concept-properties#parent';
 export const childProperty = 'http://hl7.org/fhir/concept-properties#child';
@@ -57,11 +56,12 @@ export async function findTerminologyResource<T extends TerminologyResource>(
     ],
   });
 
+  const systemRepo = repo.getSystemRepo();
   if (!results.length) {
     throw new OperationOutcomeError(badRequest(`${resourceType} ${url} not found`));
   } else if (results.length === 1 || !sameTerminologyResourceVersion(results[0], results[1])) {
     if (options?.ownProjectOnly) {
-      const fullResource = await getSystemRepo().readReference(createReference(results[0]));
+      const fullResource = await systemRepo.readReference(createReference(results[0]));
       if (fullResource.meta?.project === repo.currentProject()?.id) {
         return results[0];
       }
@@ -73,7 +73,7 @@ export async function findTerminologyResource<T extends TerminologyResource>(
     for (const resource of results) {
       resourceReferences.push(createReference(resource));
     }
-    const resources = await getSystemRepo().readReferences(resourceReferences);
+    const resources = await systemRepo.readReferences(resourceReferences);
     const projectResource = resources.find((r) => r instanceof Error || (project && r.meta?.project === project.id));
     if (projectResource instanceof Error) {
       throw projectResource;
@@ -122,15 +122,21 @@ export function addPropertyFilter(
 ): SelectQuery {
   const multiValue = condition.op.endsWith('in');
   const values = multiValue ? condition.value.split(',') : condition.value;
-  const propertyQuery = new SelectQuery('Coding_Property').whereExpr(
-    new Conjunction([
-      new Condition(new Column(query.effectiveTableName, 'id'), '=', new Column('Coding_Property', 'coding')),
-      new Condition(new Column('Coding_Property', 'property'), '=', property.id),
-      new Condition('value', multiValue ? 'IN' : '=', values),
-    ])
-  );
+  const whereClauses = [
+    new Condition(new Column(query.effectiveTableName, 'id'), '=', new Column('Coding_Property', 'coding')),
+    new Condition(new Column('Coding_Property', 'property'), '=', property.id),
+  ];
+  if (condition.op !== 'exists') {
+    whereClauses.push(new Condition('value', multiValue ? 'IN' : '=', values));
+  }
 
-  query.whereExpr(new SqlFunction('EXISTS', [propertyQuery]));
+  const propertyQuery = new SqlFunction('EXISTS', [
+    new SelectQuery('Coding_Property').whereExpr(new Conjunction(whereClauses)),
+  ]);
+
+  query.whereExpr(
+    condition.op === 'exists' && condition.value === 'false' ? new Negation(propertyQuery) : propertyQuery
+  );
   return query;
 }
 
@@ -177,16 +183,13 @@ export function getParentProperty(codeSystem: CodeSystem): CodeSystemProperty {
       badRequest(`Invalid filter: CodeSystem ${codeSystem.url} does not have an is-a hierarchy`)
     );
   }
-  let property = codeSystem.property?.find((p) => p.uri === parentProperty);
-  if (!property) {
-    // Implicit parent property for hierarchical CodeSystems
-    property = { code: codeSystem.hierarchyMeaning ?? 'parent', uri: parentProperty, type: 'code' };
-  }
-  return property;
+  const property = codeSystem.property?.find((p) => p.uri === parentProperty);
+  // Implicit parent property for hierarchical CodeSystems
+  return property ?? { code: codeSystem.hierarchyMeaning ?? 'parent', uri: parentProperty, type: 'code' };
 }
 
 export async function resolveProperty(
-  db: Pool | PoolClient,
+  db: PgQueryable,
   codeSystem: WithId<CodeSystem>,
   property: CodeSystemProperty
 ): Promise<WithId<CodeSystemProperty> | undefined> {

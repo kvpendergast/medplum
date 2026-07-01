@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { createReference } from '@medplum/core';
-import type { DiagnosticReport, Observation } from '@medplum/fhirtypes';
+import type { DiagnosticReport, Observation, Reference } from '@medplum/fhirtypes';
 import { HomerDiagnosticReport, HomerSimpson, MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import { MemoryRouter } from 'react-router';
@@ -72,6 +72,7 @@ const syntheaReport: DiagnosticReport = {
       data: 'SGVsbG8gd29ybGQ=',
     },
   ],
+  conclusion: 'All values within normal range',
 };
 
 const medplum = new MockClient();
@@ -86,6 +87,15 @@ describe('DiagnosticReportDisplay', () => {
       </MemoryRouter>
     );
   }
+
+  beforeAll(async () => {
+    const obs = await medplum.createResource(CreatinineObservation);
+    const report = {
+      ...ExampleReport,
+      result: [createReference(obs)],
+    };
+    await medplum.updateResource(report);
+  });
 
   test('Renders by value', async () => {
     await act(async () => {
@@ -146,9 +156,6 @@ describe('DiagnosticReportDisplay', () => {
   });
 
   test('Renders performer', async () => {
-    const obs = await medplum.createResource(CreatinineObservation);
-    ExampleReport.result = [createReference(obs)];
-    await medplum.updateResource(ExampleReport);
     await act(async () => {
       setup({ value: ExampleReport });
     });
@@ -158,9 +165,6 @@ describe('DiagnosticReportDisplay', () => {
   });
 
   test('Renders observation category', async () => {
-    const obs = await medplum.createResource(CreatinineObservation);
-    ExampleReport.result = [createReference(obs)];
-    await medplum.updateResource(ExampleReport);
     await act(async () => {
       setup({ value: ExampleReport });
     });
@@ -169,9 +173,6 @@ describe('DiagnosticReportDisplay', () => {
   });
 
   test('Renders observation note', async () => {
-    const obs = await medplum.createResource(CreatinineObservation);
-    ExampleReport.result = [createReference(obs)];
-    await medplum.updateResource(ExampleReport);
     await act(async () => {
       setup({ value: ExampleReport });
     });
@@ -179,9 +180,6 @@ describe('DiagnosticReportDisplay', () => {
   });
 
   test('Hide observation note', async () => {
-    const obs = await medplum.createResource(CreatinineObservation);
-    ExampleReport.result = [createReference(obs)];
-    await medplum.updateResource(ExampleReport);
     await act(async () => {
       setup({ value: ExampleReport, hideObservationNotes: true });
     });
@@ -243,8 +241,13 @@ describe('DiagnosticReportDisplay', () => {
     // This is a technically valid Observation resource,
     // although it doesn't really make sense.
     // It uses "Observation Grouping" to create a cycle.
-    let obs = await medplum.createResource({ resourceType: 'Observation', valueString: 'XYZ' } as Observation);
-    obs = await medplum.updateResource({ ...obs, hasMember: [createReference(obs)] } as Observation);
+    let obs = await medplum.createResource({
+      resourceType: 'Observation',
+      status: 'final',
+      code: { text: 'test' },
+      valueString: 'XYZ',
+    });
+    obs = await medplum.updateResource({ ...obs, hasMember: [createReference(obs) as Reference<Observation>] });
 
     const report: DiagnosticReport = {
       resourceType: 'DiagnosticReport',

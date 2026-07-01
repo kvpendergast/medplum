@@ -2,32 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 import { allOk, FileBuilder } from '@medplum/core';
 import type { FhirRequest, FhirResponse } from '@medplum/fhir-router';
-import type { OperationDefinition } from '@medplum/fhirtypes';
-import { requireSuperAdmin } from '../../admin/super';
+import { requireSuperAdmin } from '../../context';
 import { DatabaseMode, getDatabasePool } from '../../database';
-import { buildMigration } from '../../migrations/migrate';
+import { generateMigrationActions, writePreDeployActionsToBuilder } from '../../migrations/migrate';
+import { makeOperationDefinition } from './definitions';
 import { buildOutputParameters } from './utils/parameters';
 
-const operation: OperationDefinition = {
-  resourceType: 'OperationDefinition',
-  name: 'db-schema-diff',
-  status: 'active',
-  kind: 'operation',
-  code: 'schema-diff',
-  experimental: true,
-  system: true,
-  type: false,
-  instance: false,
-  parameter: [
-    {
-      use: 'out',
-      name: 'migrationString',
-      type: 'string',
-      min: 1,
-      max: '1',
-    },
-  ],
-};
+const operation = makeOperationDefinition(
+  { scope: 'system' },
+  {
+    name: 'db-schema-diff',
+    code: 'schema-diff',
+    parameter: [
+      {
+        use: 'out',
+        name: 'migrationString',
+        type: 'string',
+        min: 1,
+        max: '1',
+      },
+    ],
+  }
+);
 
 export async function dbSchemaDiffHandler(_req: FhirRequest): Promise<FhirResponse> {
   requireSuperAdmin();
@@ -36,10 +32,13 @@ export async function dbSchemaDiffHandler(_req: FhirRequest): Promise<FhirRespon
   const b = new FileBuilder('  ', false);
   b.append('// The schema migration needed to match the expected schema');
   b.append('');
-  await buildMigration(b, {
+
+  const actions = await generateMigrationActions({
     dbClient,
     dropUnmatchedIndexes: true,
-    allowPostDeployActions: true,
   });
+
+  writePreDeployActionsToBuilder(b, [...actions.preDeploy, ...actions.postDeploy]);
+
   return [allOk, buildOutputParameters(operation, { migrationString: b.toString() })];
 }

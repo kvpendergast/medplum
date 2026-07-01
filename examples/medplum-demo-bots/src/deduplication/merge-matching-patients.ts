@@ -1,10 +1,16 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { createReference, deepClone, getQuestionnaireAnswers, getReferenceString, resolveId } from '@medplum/core';
+import {
+  createReference,
+  deepClone,
+  EMPTY,
+  getQuestionnaireAnswers,
+  getReferenceString,
+  resolveId,
+} from '@medplum/core';
 import type { BotEvent, MedplumClient, WithId } from '@medplum/core';
 import type {
   Bundle,
-  Identifier,
   Patient,
   QuestionnaireResponse,
   QuestionnaireResponseItemAnswer,
@@ -91,7 +97,7 @@ export async function handler(medplum: MedplumClient, event: BotEvent<Questionna
   // despite the fact that it is an inactive record.
   const deleteSource = responses['deleteSource']?.valueBoolean;
   if (deleteSource === true) {
-    await medplum.deleteResource('Patient', mergedPatients.src.id as string);
+    await medplum.deleteResource('Patient', mergedPatients.src.id);
   } else {
     // If we don't delete the source patient record, we need to update it to be inactive.
     await medplum.updateResource<Patient>(mergedPatients.src);
@@ -184,7 +190,7 @@ export function mergePatientRecords(
     }
     // If this identifier is not present on the target, add it to the merged record and mark it as 'old'
     else {
-      mergedIdentifiers.push({ ...srcIdentifier, use: 'old' } as Identifier);
+      mergedIdentifiers.push({ ...srcIdentifier, use: 'old' });
     }
   }
 
@@ -260,22 +266,20 @@ export async function rewriteClinicalDataReferences(
   // Process all pages of results
   while (bundle) {
     // Process all entries in the current bundle
-    if (bundle.entry) {
-      for (const entry of bundle.entry) {
-        const resource = entry.resource;
-        if (!resource) {
-          continue;
-        }
-
-        // Skip the Patient resource itself (only if it matches the source patient ID)
-        if (resource.resourceType === 'Patient' && resource.id === sourcePatient.id) {
-          continue;
-        }
-
-        // Rewrite references from source to target
-        replaceReferences(resource, sourceReference, targetReference);
-        await medplum.updateResource(resource);
+    for (const entry of bundle.entry ?? EMPTY) {
+      const resource = entry.resource;
+      if (!resource) {
+        continue;
       }
+
+      // Skip the Patient resource itself (only if it matches the source patient ID)
+      if (resource.resourceType === 'Patient' && resource.id === sourcePatient.id) {
+        continue;
+      }
+
+      // Rewrite references from source to target
+      replaceReferences(resource, sourceReference, targetReference);
+      await medplum.updateResource(resource);
     }
 
     // Check for next page

@@ -5,15 +5,15 @@
  * Do not edit manually.
  */
 
-import { AccessPolicy } from './AccessPolicy';
-import { Extension } from './Extension';
-import { Identifier } from './Identifier';
-import { Meta } from './Meta';
-import { Narrative } from './Narrative';
-import { Reference } from './Reference';
-import { Resource } from './Resource';
-import { ResourceType } from './ResourceType';
-import { User } from './User';
+import type { AccessPolicy } from './AccessPolicy.d.ts';
+import type { Extension } from './Extension.d.ts';
+import type { Identifier } from './Identifier.d.ts';
+import type { Meta } from './Meta.d.ts';
+import type { Narrative } from './Narrative.d.ts';
+import type { Reference } from './Reference.d.ts';
+import type { Resource } from './Resource.d.ts';
+import type { ResourceType } from './ResourceType.d.ts';
+import type { User } from './User.d.ts';
 
 /**
  * Encapsulation of resources for a specific project or organization.
@@ -138,11 +138,13 @@ export interface Project {
   /**
    * A list of optional features that are enabled for the project.
    */
-  features?: ('ai' | 'aws-comprehend' | 'aws-textract' | 'bots' | 'cron' | 'email' | 'google-auth-required' |
-      'graphql-introspection' | 'websocket-subscriptions' | 'transaction-bundles' | 'validate-terminology')[];
+  features?: ('ai' | 'ai-realtime' | 'aws-comprehend' | 'aws-textract' | 'bots' | 'cron' | 'email' |
+      'google-auth-required' | 'graphql-introspection' | 'scheduling' | 'websocket-subscriptions' | 'transaction-bundles' |
+      'validate-terminology' | 'range-search' | 'log-streaming')[];
 
   /**
-   * The default access policy for patients using open registration.
+   * @deprecated Use defaultAccessPolicies instead. The default access policy
+   * for patients using open registration.
    */
   defaultPatientAccessPolicy?: Reference<AccessPolicy>;
 
@@ -190,6 +192,27 @@ export interface Project {
    * The resource types exported by the project when linked
    */
   exportedResourceType?: ResourceType[];
+
+  /**
+   * Default access policies to apply to project members by role when no explicit policy is provided.
+   */
+  defaultAccessPolicies?: ProjectDefaultAccessPolicy[];
+}
+
+/**
+ * Default access policy to apply to project members of a given role.
+ */
+export interface ProjectDefaultAccessPolicy {
+
+  /**
+   * The member role this policy applies to.
+   */
+  profileType: 'Patient' | 'Practitioner' | 'RelatedPerson' | 'Admin';
+
+  /**
+   * The access policy to apply to members of this role.
+   */
+  accessPolicy: Reference<AccessPolicy>;
 }
 
 /**

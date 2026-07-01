@@ -15,9 +15,9 @@ import Bowser from 'bowser';
 import type { Request, Response } from 'express';
 import { getAuthenticatedContext } from '../context';
 import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
-import type { Repository } from '../fhir/repo';
-import { getSystemRepo } from '../fhir/repo';
+import type { SystemRepository } from '../fhir/repo';
 import { rewriteAttachments, RewriteMode } from '../fhir/rewrite';
+import { isMfaRequired } from './utils';
 
 interface UserSession {
   id: string;
@@ -30,13 +30,13 @@ interface UserSession {
 
 interface UserSecurity {
   mfaEnrolled: boolean;
+  mfaRequired: boolean;
   sessions: UserSession[];
   memberships: Partial<ProjectMembership>[];
 }
 
 export async function meHandler(req: Request, res: Response): Promise<void> {
-  const systemRepo = getSystemRepo();
-  const { authState } = getAuthenticatedContext();
+  const { authState, systemRepo } = getAuthenticatedContext();
   const { project, membership } = authState;
   const profileRef = membership.profile as Reference<ProfileResource>;
   const profile = await systemRepo.readReference<ProfileResource>(profileRef);
@@ -65,6 +65,7 @@ export async function meHandler(req: Request, res: Response): Promise<void> {
     });
     security = {
       mfaEnrolled: !!user.mfaEnrolled,
+      mfaRequired: isMfaRequired(user, project),
       sessions,
       memberships: memberships
         .filter((m) => m.active !== false)
@@ -91,6 +92,7 @@ export async function meHandler(req: Request, res: Response): Promise<void> {
       resourceType: 'Project',
       id: project.id,
       name: project.name,
+      features: project.features,
       description: project.description,
       strictMode: project.strictMode,
       superAdmin: project.superAdmin,
@@ -113,7 +115,7 @@ export async function meHandler(req: Request, res: Response): Promise<void> {
 }
 
 export async function getUserConfiguration(
-  systemRepo: Repository,
+  systemRepo: SystemRepository,
   project: Project,
   membership: ProjectMembership
 ): Promise<UserConfiguration> {
@@ -125,10 +127,7 @@ export async function getUserConfiguration(
     result = { resourceType: 'UserConfiguration' };
   }
 
-  if (!result.menu) {
-    result.menu = getUserConfigurationMenu(project, membership);
-  }
-
+  result.menu ??= getUserConfigurationMenu(project, membership);
   return result;
 }
 
@@ -142,17 +141,17 @@ export function getUserConfigurationMenu(project: Project, membership: ProjectMe
     },
   ];
 
+  const link = [
+    { name: 'Project', target: '/admin/project' },
+    { name: 'AccessPolicy', target: '/AccessPolicy' },
+    { name: 'Subscriptions', target: '/Subscription' },
+    { name: 'Batch', target: '/batch' },
+  ];
+  if (!project.superAdmin) {
+    link.push({ name: 'Config', target: '/admin/config' });
+  }
   if (membership.admin) {
-    result.push({
-      title: 'Admin',
-      link: [
-        { name: 'Project', target: '/admin/project' },
-        { name: 'AccessPolicy', target: '/AccessPolicy' },
-        { name: 'Subscriptions', target: '/Subscription' },
-        { name: 'Batch', target: '/batch' },
-        ...(!project.superAdmin ? [{ name: 'Config', target: '/admin/config' }] : []),
-      ],
-    });
+    result.push({ title: 'Admin', link });
   }
 
   if (project.superAdmin) {
@@ -170,7 +169,7 @@ export function getUserConfigurationMenu(project: Project, membership: ProjectMe
   return result;
 }
 
-async function getSessions(systemRepo: Repository, user: WithId<User>): Promise<UserSession[]> {
+async function getSessions(systemRepo: SystemRepository, user: WithId<User>): Promise<UserSession[]> {
   const logins = await systemRepo.searchResources<Login>({
     resourceType: 'Login',
     filters: [

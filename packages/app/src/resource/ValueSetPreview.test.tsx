@@ -40,7 +40,7 @@ describe('ValueSetPreview', () => {
 
     // Wait for the drop down
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Press the down arrow to select first option
@@ -55,15 +55,15 @@ describe('ValueSetPreview', () => {
   }
 
   beforeEach(() => {
-    jest.useFakeTimers();
-    jest.clearAllMocks();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.clearAllMocks();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      await vi.runOnlyPendingTimersAsync();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders ValueSetAutocomplete', async () => {
@@ -84,7 +84,7 @@ describe('ValueSetPreview', () => {
     });
 
     // Mock valueSetExpand
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
 
     await setup(valueSet);
 
@@ -108,15 +108,15 @@ describe('ValueSetPreview', () => {
       },
     });
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue({
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue({
       resourceType: 'Parameters',
       parameter: [],
     });
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for lookup to complete
@@ -173,12 +173,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for lookup to be called
@@ -209,17 +209,17 @@ describe('ValueSetPreview', () => {
       },
     });
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
     // Mock a delayed lookup response
     let resolveLookup: (value: Parameters) => void;
     const lookupPromise = new Promise<Parameters>((resolve) => {
       resolveLookup = resolve;
     });
-    medplum.get = jest.fn().mockReturnValue(lookupPromise);
+    medplum.get = vi.fn().mockReturnValue(lookupPromise);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Verify loading state appears
@@ -259,12 +259,12 @@ describe('ValueSetPreview', () => {
       },
     });
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockRejectedValue(new Error('Lookup failed'));
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockRejectedValue(new Error('Lookup failed'));
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for error to appear
@@ -300,12 +300,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for lookup to complete
@@ -350,12 +350,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for properties to be rendered
@@ -446,12 +446,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for all properties to be rendered
@@ -497,12 +497,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for property to be rendered with N/A
@@ -528,20 +528,20 @@ describe('ValueSetPreview', () => {
       },
     });
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue({
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue({
       resourceType: 'Parameters',
       parameter: [],
     });
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
 
     // Type to trigger search
     await act(async () => {
       fireEvent.change(input, { target: { value: 'code' } });
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     // Press the down arrow
@@ -604,12 +604,12 @@ describe('ValueSetPreview', () => {
       ],
     };
 
-    medplum.valueSetExpand = jest.fn().mockResolvedValue(valueSet);
-    medplum.get = jest.fn().mockResolvedValue(lookupResult);
+    medplum.valueSetExpand = vi.fn().mockResolvedValue(valueSet);
+    medplum.get = vi.fn().mockResolvedValue(lookupResult);
 
     await setup(valueSet);
 
-    const input = (await screen.findByPlaceholderText('Select a value from the ValueSet')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText<HTMLInputElement>('Select a value from the ValueSet');
     await selectValue(input, 'Display');
 
     // Wait for properties to be rendered

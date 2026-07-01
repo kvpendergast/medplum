@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import { accepted, allOk, isOk } from '@medplum/core';
+import { accepted, allOk, isOk, singularize } from '@medplum/core';
 import type { FhirRequest, HttpMethod } from '@medplum/fhir-router';
 import type { AsyncJob, OperationOutcome } from '@medplum/fhirtypes';
 import type { Request, Response } from 'express';
@@ -12,24 +12,26 @@ import { AsyncJobExecutor } from './operations/utils/asyncjobexecutor';
 import { sendOutcome } from './outcomes';
 import { sendFhirResponse } from './response';
 
-// Asychronous Job Status API
+// Asynchronous Job Status API
 // https://hl7.org/fhir/async-bundle.html
 
 export const jobRouter = Router();
 
-const finalJobStatusCodes = ['completed', 'error'];
+const finalJobStatusCodes = ['completed', 'error', 'cancelled'];
 
 jobRouter.get('/:id/status', async (req: Request, res: Response) => {
   const ctx = getAuthenticatedContext();
-  const { id } = req.params;
+  const id = singularize(req.params.id) ?? '';
+  // This inexpensive read should be exempt from rate limits so that users can poll
+  // for job state when the job exhausts the available FHIR quota
   const asyncJob = await ctx.repo.readResource<AsyncJob>('AsyncJob', id);
 
   let outcome: OperationOutcome;
-  if (!finalJobStatusCodes.includes(asyncJob.status as string)) {
+  if (finalJobStatusCodes.includes(asyncJob.status)) {
+    outcome = allOk;
+  } else {
     const exec = new AsyncJobExecutor(ctx.repo, asyncJob);
     outcome = accepted(exec.getContentLocation(getConfig().baseUrl));
-  } else {
-    outcome = allOk;
   }
 
   return sendFhirResponse(req, res, outcome, asyncJob);
@@ -41,7 +43,7 @@ jobRouter.delete('/:id/status', async (req: Request, res: Response) => {
     method: req.method as HttpMethod,
     url: req.originalUrl.replace('/fhir/R4', ''),
     pathname: '',
-    params: req.params,
+    params: req.params as Record<string, string>,
     query: {},
     body: req.body,
     headers: req.headers,

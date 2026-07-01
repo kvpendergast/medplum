@@ -13,33 +13,87 @@ import type {
   ProjectMembership,
   Resource,
 } from '@medplum/fhirtypes';
-import { randomUUID } from 'crypto';
-import { setDefaultResultOrder } from 'dns';
+import { generateKeyPairSync } from 'crypto';
 import type { Express } from 'express';
 import type Redis from 'ioredis';
-import type internal from 'stream';
+import { execSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { setDefaultResultOrder } from 'node:dns';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type internal from 'node:stream';
+import type { QueryConfigValues, QueryResult, QueryResultRow } from 'pg';
+import { Client as PgClient } from 'pg';
 import request from 'supertest';
+import type { Mock, MockInstance } from 'vitest';
+import { vi } from 'vitest';
 import type { ServerInviteResponse } from './admin/invite';
-import { inviteUser } from './admin/invite';
+import type * as App from './app';
 import type { MedplumRedisConfig } from './config/types';
-import { RequestContext } from './context';
-import type { RepositoryContext } from './fhir/repo';
-import { Repository, getSystemRepo } from './fhir/repo';
-import { generateAccessToken } from './oauth/keys';
-import { tryLogin } from './oauth/utils';
+import './test-matchers';
+// `fhir/repo`, `fhir/accesspolicy`, `admin/invite`, `oauth/keys`, and `context` are dynamically imported below.
+// Static imports here would load `workers/subscription` (via `fhir/repo`) or `database` (via `oauth/keys` /
+// `context`) while setupFiles still run. Vitest hoists `vi.mock` per file, not across setupFiles and test
+// files, so modules that import `node-fetch`, `../constants`, or `pg` statically would bind to the wrong
+// instances before test files register their mocks.
+import type { Repository } from './fhir/repo';
+import { PLACEHOLDER_SHARD_ID } from './fhir/sharding';
+import type { PgQueryable } from './fhir/sql';
+// Dynamically imported below. A static import would load `fhir/repo` → `database` → `pg`
+// while setupFiles run, before per-test-file `vi.mock('pg')` is registered.
 import { requestContextStore } from './request-context-store';
-
 // supertest v7 can cause websocket tests to hang without this
 setDefaultResultOrder('ipv4first');
 
+// Many integration tests call initApp/shutdownApp in quick succession (e.g. resource-cap.test.ts
+// does both in beforeEach/afterEach). Without serialization, shutdown can overlap the next init,
+// leaving the DB pool or Redis in a bad state and causing intermittent HTTP failures in later tests.
+const { withAppLifecycle } = vi.hoisted(() => {
+  let appLifecycleLock: Promise<unknown> = Promise.resolve();
+  function withAppLifecycle<T>(fn: () => Promise<T>): Promise<T> {
+    const result = appLifecycleLock.then(fn, fn);
+    appLifecycleLock = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+  return { withAppLifecycle };
+});
+
+// Share one `node-fetch` mock between setup and test files so `subscription.ts` and
+// tests configure the same `vi.fn()` instance.
+const { mockFetch } = vi.hoisted(() => ({
+  mockFetch: vi.fn() as Mock,
+}));
+
+vi.mock('node-fetch', () => ({ default: mockFetch }));
+
+export { mockFetch };
+vi.mock('bullmq', async () => import('./__mocks__/bullmq'));
+
+vi.mock('./app', async (importOriginal) => {
+  const actual = await importOriginal<typeof App>();
+  return {
+    ...actual,
+    initApp: (...args: Parameters<typeof actual.initApp>) => withAppLifecycle(() => actual.initApp(...args)),
+    initAppServices: (...args: Parameters<typeof actual.initAppServices>) =>
+      withAppLifecycle(() => actual.initAppServices(...args)),
+    shutdownApp: () => withAppLifecycle(() => actual.shutdownApp()),
+  };
+});
+
 export interface TestProjectOptions {
   project?: Partial<Project>;
+  client?: Partial<ClientApplication>;
   accessPolicy?: Partial<AccessPolicy>;
   membership?: Partial<ProjectMembership>;
   superAdmin?: boolean;
   withClient?: boolean;
   withAccessToken?: boolean;
-  withRepo?: boolean | Partial<RepositoryContext>;
+  withRepo?: boolean;
+  extendedMode?: boolean;
 }
 
 type Exact<T, U extends T> = T & Record<Exclude<keyof U, keyof T>, never>;
@@ -52,14 +106,15 @@ export type TestProjectResult<T extends TestProjectOptions> = {
   membership: T['withClient'] extends true ? WithId<ProjectMembership> : undefined;
   login: T['withAccessToken'] extends true ? WithId<Login> : undefined;
   accessToken: T['withAccessToken'] extends true ? string : undefined;
-  repo: T['withRepo'] extends true | Partial<RepositoryContext> ? Repository : undefined;
+  repo: T['withRepo'] extends true ? Repository : undefined;
 };
 
 export async function createTestProject<T extends StrictTestProjectOptions<T> = TestProjectOptions>(
   options?: T
 ): Promise<TestProjectResult<T>> {
-  const systemRepo = getSystemRepo();
-
+  const { getRepoForLogin } = await import('./fhir/accesspolicy');
+  const { getShardSystemRepo } = await import('./fhir/repo');
+  const systemRepo = getShardSystemRepo(PLACEHOLDER_SHARD_ID); // shardId will be an optional input parameter
   const project = await systemRepo.createResource<Project>({
     resourceType: 'Project',
     name: 'Test Project',
@@ -80,7 +135,7 @@ export async function createTestProject<T extends StrictTestProjectOptions<T> = 
 
   let client: WithId<ClientApplication> | undefined;
   let accessPolicy: AccessPolicy | undefined;
-  let membership: ProjectMembership | undefined;
+  let membership: WithId<ProjectMembership> | undefined;
   let login: WithId<Login> | undefined;
   let accessToken: string | undefined;
   let repo: Repository | undefined;
@@ -100,6 +155,7 @@ export async function createTestProject<T extends StrictTestProjectOptions<T> = 
           url: 'https://example.com/logo.png',
         },
       },
+      ...options?.client,
     });
 
     if (options?.accessPolicy) {
@@ -119,7 +175,7 @@ export async function createTestProject<T extends StrictTestProjectOptions<T> = 
       ...options?.membership,
     });
 
-    if (options?.withAccessToken) {
+    if (options?.withAccessToken || options?.withRepo) {
       const scope = 'openid';
 
       login = await systemRepo.createResource<Login>({
@@ -132,6 +188,7 @@ export async function createTestProject<T extends StrictTestProjectOptions<T> = 
         scope,
       });
 
+      const { generateAccessToken } = await import('./oauth/keys');
       accessToken = await generateAccessToken({
         login_id: login.id,
         sub: client.id,
@@ -140,25 +197,11 @@ export async function createTestProject<T extends StrictTestProjectOptions<T> = 
         profile: client.resourceType + '/' + client.id,
         scope,
       });
-    }
 
-    if (options?.withRepo) {
-      const repoContext: RepositoryContext = {
-        projects: [project],
-        currentProject: project,
-        author: createReference(client),
-        superAdmin: options?.superAdmin,
-        projectAdmin: options?.membership?.admin,
-        accessPolicy,
-        strictMode: project.strictMode,
-        extendedMode: true,
-        checkReferencesOnWrite: project.checkReferencesOnWrite,
-      };
-
-      if (typeof options.withRepo === 'object') {
-        Object.assign(repoContext, options.withRepo);
+      if (options?.withRepo) {
+        const userConfig = { resourceType: 'UserConfiguration' } as const;
+        repo = await getRepoForLogin({ login, project, membership, userConfig }, options?.extendedMode ?? true);
       }
-      repo = new Repository(repoContext);
     }
   }
 
@@ -183,10 +226,18 @@ export async function initTestAuth(options?: TestProjectOptions): Promise<string
 
 export async function addTestUser(
   project: WithId<Project>,
-  accessPolicy?: AccessPolicy
+  options?: {
+    accessPolicy?: AccessPolicy;
+    resourceType?: 'Practitioner' | 'Patient';
+    scope?: string;
+  }
 ): Promise<ServerInviteResponse & { accessToken: string }> {
+  let accessPolicy = options?.accessPolicy;
+  const resourceType = options?.resourceType ?? 'Practitioner';
+
   if (accessPolicy) {
-    const systemRepo = getSystemRepo();
+    const { getProjectSystemRepo } = await import('./fhir/repo');
+    const systemRepo = await getProjectSystemRepo(project);
     accessPolicy = await systemRepo.createResource<AccessPolicy>({
       ...accessPolicy,
       meta: { project: project.id },
@@ -195,11 +246,12 @@ export async function addTestUser(
 
   const email = randomUUID() + '@example.com';
   const password = randomUUID();
+  const { inviteUser } = await import('./admin/invite');
   const inviteResponse = await inviteUser({
     project,
     email,
     password,
-    resourceType: 'Practitioner',
+    resourceType,
     firstName: 'Bob',
     lastName: 'Jones',
     sendEmail: false,
@@ -210,14 +262,17 @@ export async function addTestUser(
 
   const { user, profile } = inviteResponse;
 
+  const { tryLogin } = await import('./oauth/utils');
   const login = await tryLogin({
     authMethod: 'password',
     email,
     password,
-    scope: 'openid',
+    scope: options?.scope ?? 'openid',
     nonce: 'nonce',
+    projectId: project.id,
   });
 
+  const { generateAccessToken } = await import('./oauth/keys');
   const accessToken = await generateAccessToken({
     login_id: login.id,
     sub: user.id,
@@ -234,21 +289,17 @@ export async function addTestUser(
  * @param pwnedPassword - The pwnedPassword mock.
  * @param numPwns - The mock value to return. Zero is a safe password.
  */
-export function setupPwnedPasswordMock(pwnedPassword: jest.Mock, numPwns: number): void {
+export function setupPwnedPasswordMock(pwnedPassword: Mock, numPwns: number): void {
   pwnedPassword.mockImplementation(async () => numPwns);
 }
 
-/**
- * Sets up the fetch mock to handle Recaptcha requests.
- * @param fetch - The fetch mock.
- * @param success - Whether the mock should return a successful response.
- */
-export function setupRecaptchaMock(fetch: jest.Mock, success: boolean): void {
-  fetch.mockImplementation(() => ({
-    status: 200,
-    json: () => ({ success }),
-  }));
-}
+export {
+  mockFetchJson,
+  mockFetchStatus,
+  mockFetchText,
+  setupRecaptchaMock,
+  type MockFetchInit,
+} from './test.setup.fetch';
 
 /**
  * Returns true if the resource is in an entry in the bundle.
@@ -264,13 +315,20 @@ export function bundleContains(bundle: Bundle, resource: Resource): BundleEntry 
  * Waits for a function to evaluate successfully.
  * Use this to wait for async behaviors without a handle.
  * @param fn - Function to call.
+ * @param timeoutMs - Maximum time to wait before rejecting (default 10s).
  */
-export function waitFor(fn: () => Promise<void>): Promise<void> {
-  return new Promise((resolve) => {
+export function waitFor(fn: () => Promise<void>, timeoutMs = 10_000): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
     const timer = setInterval(() => {
+      if (Date.now() > deadline) {
+        clearInterval(timer);
+        reject(new Error(`waitFor timed out after ${timeoutMs}ms`));
+        return;
+      }
       fn()
         .then(() => {
-          clearTimeout(timer);
+          clearInterval(timer);
           resolve();
         })
         .catch(() => {
@@ -280,23 +338,45 @@ export function waitFor(fn: () => Promise<void>): Promise<void> {
   });
 }
 
-export async function waitForAsyncJob(contentLocation: string, app: Express, accessToken: string): Promise<AsyncJob> {
-  for (let i = 0; i < 100; i++) {
+export type WaitForAsyncJobOptions = {
+  maxAttempts?: number;
+  pollIntervalMs?: number;
+  completionDelayMs?: number;
+};
+
+export async function waitForAsyncJob(
+  contentLocation: string,
+  app: Express,
+  accessToken: string,
+  options?: WaitForAsyncJobOptions
+): Promise<AsyncJob> {
+  const maxAttempts = options?.maxAttempts ?? 100;
+  const pollIntervalMs = options?.pollIntervalMs ?? 450;
+  const completionDelayMs = options?.completionDelayMs ?? 500;
+
+  for (let i = 0; i < maxAttempts; i++) {
     const res = await request(app)
       .get(new URL(contentLocation).pathname)
+      .set('X-Medplum', 'extended')
       .set('Authorization', 'Bearer ' + accessToken);
     if (res.status !== 202) {
-      await sleep(500); // Buffer time to ensure that any remaining async processing has fully completed
+      if (completionDelayMs > 0) {
+        await sleep(completionDelayMs); // Buffer time to ensure that any remaining async processing has fully completed
+      }
       return res.body as AsyncJob;
     }
-    await sleep(450);
+    await sleep(pollIntervalMs);
   }
   throw new Error('Async Job did not complete');
 }
 
 const DEFAULT_TEST_CONTEXT = { requestId: 'test-request-id', traceId: 'test-trace-id' };
-export function withTestContext<T>(fn: () => T, ctx?: { requestId?: string; traceId?: string }): T {
+export async function withTestContext<T>(
+  fn: () => T | Promise<T>,
+  ctx?: { requestId?: string; traceId?: string }
+): Promise<T> {
   const defaults = ctx ?? DEFAULT_TEST_CONTEXT;
+  const { RequestContext } = await import('./context');
   const context = new RequestContext(defaults.requestId ?? '', defaults.traceId ?? '');
   return requestContextStore.run(context, fn);
 }
@@ -360,4 +440,289 @@ export async function deleteRedisKeys(redisInstance: Redis, prefix: string): Pro
   totalDeleted = deletedCounts.reduce((sum, count) => sum + count, 0);
 
   return totalDeleted;
+}
+
+/**
+ * Waits for a pub/sub subscriber connection to become ready before SUBSCRIBE.
+ * ioredis runs an INFO ready check during connect; if SUBSCRIBE completes first,
+ * the connection enters subscriber mode and the ready check fails.
+ * @param subscriber - The subscriber to wait for.
+ * @returns A promise that resolves when the subscriber is ready.
+ */
+export async function waitForPubSubRedisSubscriberReady(subscriber: Redis): Promise<void> {
+  if (subscriber.status === 'ready') {
+    return;
+  }
+  if (subscriber.status === 'end' || subscriber.status === 'close') {
+    throw new Error('Redis subscriber connection is not open');
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const onReady = (): void => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err: Error): void => {
+      cleanup();
+      reject(err);
+    };
+    const onEnd = (): void => {
+      cleanup();
+      reject(new Error('Redis subscriber connection closed before ready'));
+    };
+    function cleanup(): void {
+      subscriber.off('ready', onReady);
+      subscriber.off('error', onError);
+      subscriber.off('end', onEnd);
+    }
+    subscriber.once('ready', onReady);
+    subscriber.once('error', onError);
+    subscriber.once('end', onEnd);
+    if (subscriber.status === 'ready') {
+      onReady();
+    }
+  });
+}
+
+/**
+ * Helper function to generate a self-signed certificate for testing.
+ * @param subject - The subject name for the certificate.
+ * @param isCA - Whether the certificate should be a CA certificate.
+ * @returns The generated certificate and private key.
+ */
+export function generateSelfSignedCert(subject: string, isCA = false): { cert: string; privateKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+
+  // Create certificate using X509Certificate (Node.js 15.6+)
+  const cert = createCertificate(subject, subject, publicKey, privateKey, isCA);
+
+  return { cert, privateKey };
+}
+
+/**
+ * Helper function to generate a CA-signed certificate for testing.
+ * @param subject - The subject name for the certificate.
+ * @param ca - The CA certificate and private key.
+ * @param ca.cert - The CA certificate.
+ * @param ca.privateKey - The CA private key.
+ * @returns The generated certificate and private key.
+ */
+export function generateCaSignedCert(
+  subject: string,
+  ca: { cert: string; privateKey: string }
+): { cert: string; privateKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+
+  const cert = createCaSignedCertificate(subject, publicKey, privateKey, ca.cert, ca.privateKey);
+
+  return { cert, privateKey };
+}
+
+/**
+ * Creates a certificate using openssl command
+ * @param subject - The subject name for the certificate.
+ * @param issuer - The issuer name for the certificate.
+ * @param publicKey - The public key for the certificate.
+ * @param signingKey - The private key used to sign the certificate.
+ * @param isCA - Whether the certificate should be a CA certificate.
+ * @param notBeforeDays - Number of days from now when the certificate becomes valid.
+ * @param notAfterDays - Number of days from now when the certificate expires.
+ * @returns The generated certificate in PEM format.
+ */
+function createCertificate(
+  subject: string,
+  issuer: string,
+  publicKey: string,
+  signingKey: string,
+  isCA: boolean,
+  notBeforeDays = 0,
+  notAfterDays = 365
+): string {
+  // Create temporary directory
+  const tmpDir = mkdtempSync(join(tmpdir(), 'cert-test-'));
+
+  try {
+    // Write keys to temporary files
+    const publicKeyPath = join(tmpDir, 'public.pem');
+    const signingKeyPath = join(tmpDir, 'signing.pem');
+    const certPath = join(tmpDir, 'cert.pem');
+    const configPath = join(tmpDir, 'openssl.cnf');
+
+    writeFileSync(publicKeyPath, publicKey);
+    writeFileSync(signingKeyPath, signingKey);
+
+    // Create OpenSSL config
+    const config = `
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = ${subject.replace('CN=', '')}
+
+[v3_req]
+basicConstraints = CA:${isCA ? 'TRUE' : 'FALSE'}
+keyUsage = ${isCA ? 'keyCertSign, cRLSign' : 'digitalSignature, keyEncipherment'}
+`;
+
+    writeFileSync(configPath, config);
+
+    // Calculate dates
+    const notBefore = new Date();
+    notBefore.setDate(notBefore.getDate() + notBeforeDays);
+    const notAfter = new Date();
+    notAfter.setDate(notAfter.getDate() + notAfterDays);
+
+    // Generate certificate using OpenSSL
+    const cmd = `openssl req -new -x509 -key "${signingKeyPath}" -out "${certPath}" -days ${notAfterDays - notBeforeDays} -config "${configPath}"`;
+
+    execSync(cmd, { stdio: 'pipe' });
+
+    const cert = readFileSync(certPath, 'utf8');
+    return cert;
+  } finally {
+    // Cleanup
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Creates a CA-signed certificate using openssl command.
+ * @param subject - The subject name for the certificate.
+ * @param publicKey - The public key for the certificate.
+ * @param privateKey - The private key for the certificate.
+ * @param caCert - The CA certificate.
+ * @param caPrivateKey - The CA private key.
+ * @param notBeforeDays - Number of days from now when the certificate becomes valid.
+ * @param notAfterDays - Number of days from now when the certificate expires.
+ * @returns The generated certificate in PEM format.
+ */
+function createCaSignedCertificate(
+  subject: string,
+  publicKey: string,
+  privateKey: string,
+  caCert: string,
+  caPrivateKey: string,
+  notBeforeDays = 0,
+  notAfterDays = 365
+): string {
+  // Create temporary directory
+  const tmpDir = mkdtempSync(join(tmpdir(), 'cert-test-'));
+
+  try {
+    // Write files to temporary directory
+    const privateKeyPath = join(tmpDir, 'private.pem');
+    const csrPath = join(tmpDir, 'csr.pem');
+    const certPath = join(tmpDir, 'cert.pem');
+    const caCertPath = join(tmpDir, 'ca-cert.pem');
+    const caKeyPath = join(tmpDir, 'ca-key.pem');
+    const configPath = join(tmpDir, 'openssl.cnf');
+    const extConfigPath = join(tmpDir, 'ext.cnf');
+
+    writeFileSync(privateKeyPath, privateKey);
+    writeFileSync(caCertPath, caCert);
+    writeFileSync(caKeyPath, caPrivateKey);
+
+    // Create OpenSSL config for CSR
+    const config = `
+[req]
+distinguished_name = req_distinguished_name
+prompt = no
+
+[req_distinguished_name]
+CN = ${subject.replace('CN=', '')}
+`;
+
+    writeFileSync(configPath, config);
+
+    // Create extension config
+    const extConfig = `
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+`;
+
+    writeFileSync(extConfigPath, extConfig);
+
+    // Step 1: Generate CSR
+    execSync(`openssl req -new -key "${privateKeyPath}" -out "${csrPath}" -config "${configPath}"`, {
+      stdio: 'pipe',
+    });
+
+    // Step 2: Sign CSR with CA
+    const days = notAfterDays - notBeforeDays;
+    execSync(
+      `openssl x509 -req -in "${csrPath}" -CA "${caCertPath}" -CAkey "${caKeyPath}" -CAcreateserial -out "${certPath}" -days ${days} -extfile "${extConfigPath}"`,
+      { stdio: 'pipe' }
+    );
+
+    const cert = readFileSync(certPath, 'utf8');
+    return cert;
+  } finally {
+    // Cleanup
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Installs a spy on `PgClient.prototype.query` that consults `interceptor`
+ * for each query and restores the spy after `fn` settles. The interceptor receives
+ * the SQL text (if any) and may:
+ *  - throw — the query rejects with the thrown error
+ *  - return a value — the query resolves with that value (the real DB is not hit)
+ *  - return undefined — the real query implementation runs
+ *
+ * Useful for injecting failures at the PG layer, which is necessary because the
+ * reindex worker runs its search via the transaction-scoped repo created inside
+ * `systemRepo.withTransaction(...)` — a distinct instance from `systemRepo`, so
+ * spying on `systemRepo.search` does not intercept it.
+ * @param interceptor - Called for each PG query with the SQL text; throws to reject, returns a value to resolve, or returns undefined to delegate to the real query.
+ * @param fn - The async block to run while the interceptor is installed.
+ * @returns The resolved value of `fn`.
+ */
+export async function withQueryInterceptor<T>(
+  interceptor: (sql: string | undefined) => unknown,
+  fn: () => Promise<T>
+): Promise<T> {
+  const realQuery = PgClient.prototype.query;
+  const spy = vi.spyOn(PgClient.prototype, 'query').mockImplementation(async function (
+    this: PgClient,
+    ...args: unknown[]
+  ): Promise<any> {
+    const query = args[0] as string | { text?: string } | undefined;
+    const sql = typeof query === 'string' ? query : query?.text;
+    const result = await interceptor(sql);
+    if (result !== undefined) {
+      return result;
+    }
+    return (realQuery as any).apply(this, args);
+  });
+  try {
+    return await fn();
+  } finally {
+    spy.mockRestore();
+  }
+}
+
+/**
+ * Convenience function to spy on the `query` method of the given `client: PgQueryable` returning
+ * the spy cast to the `query` overload signature commonly used in the codebase.
+ * @param client - The client to spy on.
+ * @returns The spy instance.
+ */
+export function spyOnQuery<R extends QueryResultRow = any, I = any[]>(
+  client: PgQueryable
+): MockInstance<(queryText: string, values?: QueryConfigValues<I>) => Promise<QueryResult<R>>> {
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- narrow pg's overloaded query to the promise-based signature used in tests
+  return vi.spyOn(client, 'query') as unknown as MockInstance<
+    (queryText: string, values?: QueryConfigValues<I>) => Promise<QueryResult<R>>
+  >;
 }

@@ -69,7 +69,7 @@ describe('ResourceTimeline', () => {
         resourceType: 'Communication',
         status: 'completed',
         encounter: createReference(resource),
-        subject: (resource as Encounter).subject,
+        subject: resource.subject,
         sender: createReference(sender),
         payload: [{ contentString: text }],
       }),
@@ -103,12 +103,12 @@ describe('ResourceTimeline', () => {
     await setup({
       value: HomerEncounter,
       loadTimelineResources,
-      createCommunication: jest.fn(),
+      createCommunication: vi.fn(),
       createMedia: (resource: Encounter, operator: ProfileResource, content: Attachment) => ({
         resourceType: 'Media',
         status: 'completed',
         encounter: createReference(resource),
-        subject: (resource as Encounter).subject,
+        subject: resource.subject,
         operator: createReference(operator),
         content,
       }),

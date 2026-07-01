@@ -6,7 +6,7 @@ import { HomerSimpson, MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import type { ReactNode } from 'react';
 import { MemoryRouter } from 'react-router';
-import { act, fireEvent, render, screen } from '../test-utils/render';
+import { act, fireEvent, render, screen, typeInAutocomplete } from '../test-utils/render';
 import { ProblemList } from './ProblemList';
 
 const medplum = new MockClient();
@@ -23,14 +23,14 @@ describe('PatientSummary - ProblemList', () => {
   }
 
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      vi.runOnlyPendingTimers();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders empty', async () => {
@@ -63,24 +63,10 @@ describe('PatientSummary - ProblemList', () => {
       fireEvent.click(screen.getByLabelText('Add item'));
     });
 
-    // Enter problem "Dizziness"
     const input = (await screen.findAllByRole('searchbox'))[0] as HTMLInputElement;
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Dizziness' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Press the down arrow
+    await typeInAutocomplete(input, 'Dizziness');
     await act(async () => {
       fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' });
-    });
-
-    // Press "Enter"
-    await act(async () => {
       fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
     });
 
@@ -109,24 +95,10 @@ describe('PatientSummary - ProblemList', () => {
       fireEvent.click(screen.getByText('Dizziness'));
     });
 
-    // Enter problem "Dizziness"
     const input = (await screen.findAllByRole('searchbox'))[0] as HTMLInputElement;
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Dizziness' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Press the down arrow
+    await typeInAutocomplete(input, 'Dizziness');
     await act(async () => {
       fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' });
-    });
-
-    // Press "Enter"
-    await act(async () => {
       fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
     });
 
@@ -139,6 +111,115 @@ describe('PatientSummary - ProblemList', () => {
     await act(async () => {
       fireEvent.click(screen.getByText('Save'));
     });
+  });
+
+  test('Collapses duplicate conditions by code', async () => {
+    await setup(
+      <ProblemList
+        patient={HomerSimpson}
+        problems={[
+          {
+            resourceType: 'Condition',
+            id: 'diabetes-1',
+            subject: createReference(HomerSimpson),
+            code: {
+              coding: [{ system: 'http://snomed.info/sct', code: '73211009', display: 'Diabetes mellitus' }],
+            },
+            onsetDateTime: '2020-01-01',
+          },
+          {
+            resourceType: 'Condition',
+            id: 'diabetes-2',
+            subject: createReference(HomerSimpson),
+            code: {
+              coding: [{ system: 'http://snomed.info/sct', code: '73211009', display: 'Diabetes mellitus' }],
+            },
+            onsetDateTime: '2021-06-15',
+          },
+          {
+            resourceType: 'Condition',
+            id: 'diabetes-3',
+            subject: createReference(HomerSimpson),
+            code: {
+              coding: [{ system: 'http://snomed.info/sct', code: '73211009', display: 'Diabetes mellitus' }],
+            },
+            onsetDateTime: '2022-03-10',
+          },
+        ]}
+      />
+    );
+
+    // Only one row rendered in collapsed state
+    expect(screen.getAllByText('Diabetes mellitus')).toHaveLength(1);
+    // Count badge shows +2 hidden entries
+    expect(screen.getByText('+2')).toBeInTheDocument();
+    // Expand link shown
+    expect(screen.getByText('Show all 3 entries')).toBeInTheDocument();
+  });
+
+  test('Expands and collapses duplicate group', async () => {
+    await setup(
+      <ProblemList
+        patient={HomerSimpson}
+        problems={[
+          {
+            resourceType: 'Condition',
+            id: 'hyp-1',
+            subject: createReference(HomerSimpson),
+            code: { coding: [{ system: 'http://snomed.info/sct', code: '38341003', display: 'Hypertension' }] },
+            onsetDateTime: '2019-05-01',
+          },
+          {
+            resourceType: 'Condition',
+            id: 'hyp-2',
+            subject: createReference(HomerSimpson),
+            code: { coding: [{ system: 'http://snomed.info/sct', code: '38341003', display: 'Hypertension' }] },
+            onsetDateTime: '2021-09-20',
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getAllByText('Hypertension')).toHaveLength(1);
+    expect(screen.getByText('+1')).toBeInTheDocument();
+
+    // Expand the group
+    await act(async () => {
+      fireEvent.click(screen.getByText('Show all 2 entries'));
+    });
+
+    // Both entries now visible
+    expect(screen.getAllByText('Hypertension')).toHaveLength(2);
+    expect(screen.queryByText('+1')).not.toBeInTheDocument();
+    expect(screen.getByText('Show less')).toBeInTheDocument();
+
+    // Collapse again
+    await act(async () => {
+      fireEvent.click(screen.getByText('Show less'));
+    });
+
+    expect(screen.getAllByText('Hypertension')).toHaveLength(1);
+    expect(screen.getByText('+1')).toBeInTheDocument();
+  });
+
+  test('Does not show expand button for unique conditions', async () => {
+    await setup(
+      <ProblemList
+        patient={HomerSimpson}
+        problems={[
+          {
+            resourceType: 'Condition',
+            id: 'unique-1',
+            subject: createReference(HomerSimpson),
+            code: { text: 'Unique Problem' },
+          },
+        ]}
+      />
+    );
+
+    expect(screen.getByText('Unique Problem')).toBeInTheDocument();
+    expect(screen.queryByText(/Show all/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/\+\d/)).not.toBeInTheDocument();
   });
 
   test('Problem status colors', async () => {

@@ -1,12 +1,16 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { Project } from '@medplum/fhirtypes';
+import type { MockInstance } from 'vitest';
 import { initAppServices, shutdownApp } from './app';
 import { loadTestConfig } from './config/loader';
 import { DatabaseMode, getDatabasePool } from './database';
-import type { Repository } from './fhir/repo';
-import { getSystemRepo } from './fhir/repo';
+import type { OutputAction } from './fhir/operations/db-configure-indexes';
+import { configureGinIndexes, vacuumTable } from './fhir/operations/db-configure-indexes';
+import type { SystemRepository } from './fhir/repo';
+import { getGlobalSystemRepo } from './fhir/repo';
 import { SelectQuery } from './fhir/sql';
+import { globalLogger } from './logger';
 import { getPostDeployVersion, getPreDeployVersion } from './migration-sql';
 import {
   getPendingPostDeployMigration,
@@ -17,7 +21,7 @@ import { getLatestPostDeployMigrationVersion, MigrationVersion } from './migrati
 import { seedDatabase } from './seed';
 import { withTestContext } from './test.setup';
 
-async function synchronouslyRunAllPendingPostDeployMigrations(): Promise<void> {
+async function synchronouslyRunAllPendingPostDeployMigrations(systemRepo: SystemRepository): Promise<void> {
   const lastVersion = getLatestPostDeployMigrationVersion();
 
   const pendingMigration = await getPendingPostDeployMigration(getDatabasePool(DatabaseMode.WRITER));
@@ -29,30 +33,29 @@ async function synchronouslyRunAllPendingPostDeployMigrations(): Promise<void> {
     return;
   }
 
-  console.log(
+  globalLogger.write(
     `${new Date().toISOString()} - Running pending post-deploy migrations ${pendingMigration} through ${lastVersion}`
   );
 
   for (let i = pendingMigration; i <= lastVersion; i++) {
-    await synchronouslyRunPostDeployMigration(getSystemRepo(), i);
+    await synchronouslyRunPostDeployMigration(systemRepo, i);
   }
 }
 
-async function synchronouslyRunPostDeployMigration(systemRepo: Repository, version: number): Promise<void> {
+async function synchronouslyRunPostDeployMigration(systemRepo: SystemRepository, version: number): Promise<void> {
   const migration = getPostDeployMigration(version);
   const asyncJob = await preparePostDeployMigrationAsyncJob(systemRepo, version);
   const jobData = migration.prepareJobData(asyncJob);
-  console.log(`${new Date().toISOString()} - Starting post-deploy migration v${version}`);
+  globalLogger.write(`${new Date().toISOString()} - Starting post-deploy migration v${version}`);
   const result = await migration.run(systemRepo, undefined, jobData);
-  console.log(`${new Date().toISOString()} - Post-deploy migration v${version} result: ${result}`);
+  globalLogger.write(`${new Date().toISOString()} - Post-deploy migration v${version} result: ${result}`);
 }
 
 describe('Seed', () => {
-  const originalConsoleLog = console.log;
-  let consoleLogSpy: jest.SpyInstance;
+  let loggerWriteSpy: MockInstance;
 
   beforeAll(async () => {
-    consoleLogSpy = jest.spyOn(console, 'log').mockImplementation(jest.fn());
+    loggerWriteSpy = vi.spyOn(globalLogger, 'write' as any).mockImplementation(() => undefined);
 
     const config = await loadTestConfig();
     config.database.runMigrations = true;
@@ -60,17 +63,33 @@ describe('Seed', () => {
     // asynchronously. Instead, run them synchronously below.
     config.database.disableRunPostDeployMigrations = true;
 
-    console.log(`${new Date().toISOString()} - Initializing app services`);
+    globalLogger.write(`${new Date().toISOString()} - Initializing app services`);
     await initAppServices(config);
     await withTestContext(async () => {
+      const repo = getGlobalSystemRepo();
       // Run post-deploy migrations synchronously
-      await synchronouslyRunAllPendingPostDeployMigrations();
+      await synchronouslyRunAllPendingPostDeployMigrations(repo);
+
+      // Scheduling features use serializable transactions that touch these
+      // tables. The `fastUpdate` feature can cause seemingly unrelated transactions
+      // to append to the same "pending list", which can cause transaction
+      // failures.
+      //
+      // Here we update the indexes on Appointment and Slot tables to disable `fastUpdate`,
+      // and then vacuum the tables to clear any existing pending list entries.
+      const actions: OutputAction[] = [];
+      const tables = ['Appointment', 'Appointment_References', 'Slot', 'Slot_References'];
+      const client = repo.getDatabaseClient(DatabaseMode.WRITER);
+      await configureGinIndexes(client, actions, tables, { fastUpdate: false });
+      for (const table of tables) {
+        await vacuumTable(client, actions, table);
+      }
     });
   });
 
   afterAll(async () => {
     await shutdownApp();
-    consoleLogSpy.mockRestore();
+    loggerWriteSpy.mockRestore();
   });
 
   test('Seeder completes successfully', () =>
@@ -90,7 +109,7 @@ describe('Seed', () => {
       const postDeployVersion = await getPostDeployVersion(pool);
       // only show log messages if post-deploy migrations did not run successfully
       if (getLatestPostDeployMigrationVersion() !== postDeployVersion) {
-        consoleLogSpy.mock.calls.forEach((call) => originalConsoleLog(...call));
+        loggerWriteSpy.mock.calls.forEach((call: unknown[]) => console.log(...call));
       }
       expect(postDeployVersion).toEqual(getLatestPostDeployMigrationVersion());
 

@@ -5,7 +5,7 @@ import type { FhirResponseOptions } from '@medplum/fhir-router';
 import type { Binary, OperationOutcome, Resource } from '@medplum/fhirtypes';
 import type { Request, Response } from 'express';
 import { getConfig } from '../config/loader';
-import { getAuthenticatedContext } from '../context';
+import { AuthenticatedRequestContext, tryGetRequestContext } from '../context';
 import { getBinaryStorage } from '../storage/loader';
 import { RewriteMode, rewriteAttachments } from './rewrite';
 
@@ -32,7 +32,7 @@ export function sendResponseHeaders(_req: Request, res: Response, outcome: Opera
 }
 
 export async function sendBinaryResponse(res: Response, binaryResource: Binary): Promise<void> {
-  res.contentType(binaryResource.contentType as string);
+  res.contentType(binaryResource.contentType);
   if (binaryResource.data) {
     res.send(Buffer.from(binaryResource.data, 'base64'));
   } else {
@@ -57,12 +57,16 @@ export async function sendFhirResponse(
     // When the read request has some other type in the Accept header,
     // then the content should be returned with the content type stated in the resource in the Content-Type header.
     // E.g. if the content type in the resource is "application/pdf", then the content should be returned as a PDF directly.
-    await sendBinaryResponse(res, body as Binary);
+    await sendBinaryResponse(res, body);
     return;
   }
 
-  const ctx = getAuthenticatedContext();
-  const result = await rewriteAttachments(RewriteMode.PRESIGNED_URL, ctx.repo, body);
+  let result = body;
+
+  const ctx = tryGetRequestContext();
+  if (ctx instanceof AuthenticatedRequestContext) {
+    result = await rewriteAttachments(RewriteMode.PRESIGNED_URL, ctx.repo, body);
+  }
 
   res.set('Content-Type', options?.contentType ?? ContentType.FHIR_JSON);
   res.json(result);

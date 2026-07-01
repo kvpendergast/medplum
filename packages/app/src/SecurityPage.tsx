@@ -4,7 +4,7 @@ import { Anchor, Button, Table, Title } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { ProfileResource } from '@medplum/core';
 import { formatDateTime, formatHumanName, getReferenceString, normalizeErrorString } from '@medplum/core';
-import type { HumanName, UserConfiguration } from '@medplum/fhirtypes';
+import type { UserConfiguration } from '@medplum/fhirtypes';
 import { DescriptionList, DescriptionListEntry, Document, useMedplum } from '@medplum/react';
 import type { JSX } from 'react';
 import { useEffect, useState } from 'react';
@@ -62,9 +62,7 @@ export function SecurityPage(): JSX.Element | null {
             <Anchor href={`/${getReferenceString(details.profile)}`}>{details.profile.id}</Anchor>
           </DescriptionListEntry>
           <DescriptionListEntry term="Resource Type">{details.profile.resourceType}</DescriptionListEntry>
-          <DescriptionListEntry term="Name">
-            {formatHumanName(details.profile.name?.[0] as HumanName)}
-          </DescriptionListEntry>
+          <DescriptionListEntry term="Name">{formatHumanName(details.profile.name?.[0])}</DescriptionListEntry>
         </DescriptionList>
       </Document>
       <Document>
@@ -105,9 +103,9 @@ export function SecurityPage(): JSX.Element | null {
       <Document>
         <Title>Multi Factor Auth</Title>
         <p>Enrolled: {details.security.mfaEnrolled.toString()}</p>
-        {!details.security.mfaEnrolled && (
-          <Button onClick={() => navigate('/mfa')?.catch(console.error)}>Enroll</Button>
-        )}
+        <Button onClick={() => navigate('/mfa')?.catch(console.error)}>
+          {details.security.mfaEnrolled ? 'Manage MFA' : 'Enroll'}
+        </Button>
       </Document>
     </>
   );

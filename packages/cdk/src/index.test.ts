@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { MedplumSourceInfraConfig } from '@medplum/core';
 import { App } from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
 import { unlink, writeFile } from 'fs/promises';
 import { resolve } from 'path';
 import { normalizeInfraConfig } from './config';
@@ -43,7 +44,7 @@ describe('Infra', () => {
   };
 
   beforeEach(() => {
-    console.log = jest.fn();
+    console.log = vi.fn();
   });
 
   test('Missing config', async () => {
@@ -411,6 +412,123 @@ describe('Infra', () => {
     await unlink(filename);
   });
 
+  test('Purpose-specific Redis clusters', async () => {
+    const filename = await writeConfig('./medplum.purposeRedis.config.json', {
+      ...baseConfig,
+      stackName: 'MedplumPurposeRedisStack',
+      cacheRedis: { nodeType: 'cache.r6g.large' },
+      rateLimitRedis: { nodeType: 'cache.t3.small' },
+      pubSubRedis: {},
+      backgroundJobsRedis: { securityGroupId: 'sg-1234' },
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Workers config', async () => {
+    const filename = await writeConfig('./medplum.workers.config.json', {
+      ...baseConfig,
+      name: 'workers',
+      stackName: 'MedplumWorkersStack',
+      workers: {
+        enabled: ['subscription', 'cron'],
+        bullmq: { subscription: { concurrency: 50 } },
+      },
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Workers config enabled only', async () => {
+    const filename = await writeConfig('./medplum.workersEnabledOnly.config.json', {
+      ...baseConfig,
+      name: 'workersEnabledOnly',
+      stackName: 'MedplumWorkersEnabledOnlyStack',
+      workers: {
+        enabled: ['subscription'],
+      },
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Additional service - worker', async () => {
+    const filename = await writeConfig('./medplum.additionalService.config.json', {
+      ...baseConfig,
+      name: 'worker',
+      stackName: 'MedplumWorkerStack',
+      workerServices: [
+        {
+          id: 'Worker',
+          desiredCount: 2,
+          environment: {
+            MEDPLUM_WORKERS_ENABLED: '["subscription","cron"]',
+            MEDPLUM_DATABASE_MAX_CONNECTIONS: '10',
+          },
+        },
+      ],
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Additional service with auto-scaling', async () => {
+    const filename = await writeConfig('./medplum.additionalServiceAutoScaling.config.json', {
+      ...baseConfig,
+      name: 'workerAutoScaling',
+      stackName: 'MedplumWorkerAutoScalingStack',
+      workerServices: [
+        {
+          id: 'Worker',
+          desiredCount: 1,
+          serverMemory: 1024,
+          serverCpu: 512,
+          fargateAutoScaling: {
+            minCapacity: 1,
+            maxCapacity: 5,
+            targetUtilizationPercent: 70,
+            scaleInCooldown: 60,
+            scaleOutCooldown: 60,
+          },
+        },
+      ],
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Multiple additional services', async () => {
+    const filename = await writeConfig('./medplum.multipleAdditionalServices.config.json', {
+      ...baseConfig,
+      name: 'multiService',
+      stackName: 'MedplumMultiServiceStack',
+      workerServices: [
+        {
+          id: 'SubscriptionWorker',
+          desiredCount: 2,
+          environment: {
+            MEDPLUM_WORKERS_ENABLED: '["subscription"]',
+          },
+        },
+        {
+          id: 'CronWorker',
+          desiredCount: 1,
+          environment: {
+            MEDPLUM_WORKERS_ENABLED: '["cron"]',
+          },
+        },
+      ],
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
   test('Use containerRegistryCredentialsSecretArn', async () => {
     const filename = await writeConfig('./medplum.containerRegistryCredentialsSecretArn.config.json', {
       ...baseConfig,
@@ -421,5 +539,97 @@ describe('Infra', () => {
 
     await expect(main({ config: filename })).resolves.not.toThrow();
     await unlink(filename);
+  });
+
+  test('Load balancer algorithm', async () => {
+    const filename = await writeConfig('./medplum.lb-algorithm.config.json', {
+      ...baseConfig,
+      name: 'lb-algorithm',
+      stackName: 'MedplumLoadBalancerAlgorithmStack',
+      loadBalancerAlgorithm: 'least_outstanding_requests',
+      mtlsDomainName: 'mtls.medplum.com',
+      mtlsSslCertArn: 'arn:aws:acm:us-east-1:647991932601:certificate/19d85245-0a1d-4bf5-9789-23082b1a15fc',
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('Invalid load balancer algorithm', async () => {
+    const filename = await writeConfig('./medplum.lb-algorithm-invalid.config.json', {
+      ...baseConfig,
+      name: 'lb-algorithm-invalid',
+      stackName: 'MedplumLoadBalancerAlgorithmInvalidStack',
+      loadBalancerAlgorithm: 'bogus_algorithm',
+    });
+
+    await expect(main({ config: filename })).rejects.toThrow(/loadBalancerAlgorithm/);
+    await unlink(filename);
+  });
+
+  test('mTLS', async () => {
+    const filename = await writeConfig('./medplum.mtls.config.json', {
+      ...baseConfig,
+      name: 'mtls',
+      stackName: 'MedplumMtlsStack',
+      mtlsDomainName: 'mtls.medplum.com',
+      mtlsSslCertArn: 'arn:aws:acm:us-east-1:647991932601:certificate/19d85245-0a1d-4bf5-9789-23082b1a15fc',
+      mtlsInternetFacing: true,
+      mtlsWafIpSetArn: 'arn:aws:wafv2:us-east-1:647991932601:ipset/MedplumMtlsIpSet',
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  test('GuardDuty', async () => {
+    const filename = await writeConfig('./medplum.guardduty.config.json', {
+      ...baseConfig,
+      name: 'guardduty',
+      stackName: 'MedplumGuardDutyStack',
+      guardDutyMalwareProtectionEnabled: true,
+      clamScanEnabled: false,
+    });
+
+    await expect(main({ config: filename })).resolves.not.toThrow();
+    await unlink(filename);
+  });
+
+  // Regression test for https://github.com/medplum/medplum/issues/9287:
+  // `loadBalancerLoggingPrefix` was being silently ignored because both
+  // `BackEnd.createLoadBalancer` call sites passed `loadBalancerLoggingBucket`
+  // (the bucket name) as the prefix argument.
+  test('ALB access log prefix uses loadBalancerLoggingPrefix', async () => {
+    const sourceConfig = {
+      ...baseConfig,
+      stackName: 'MedplumAlbAccessLogPrefixStack',
+      mtlsDomainName: 'mtls.medplum.com',
+      mtlsSslCertArn: 'arn:aws:acm:us-east-1:647991932601:certificate/19d85245-0a1d-4bf5-9789-23082b1a15fc',
+    } as unknown as MedplumSourceInfraConfig;
+    const config = await normalizeInfraConfig(sourceConfig);
+    const app = new App();
+    const stack = new MedplumStack(app, config);
+    const template = Template.fromStack(stack.primaryStack);
+
+    // Both the main and mTLS ALBs should set `access_logs.s3.prefix` to the
+    // configured prefix (`'elb'`), not to the bucket name.
+    const loadBalancers = template.findResources('AWS::ElasticLoadBalancingV2::LoadBalancer');
+    expect(Object.keys(loadBalancers)).toHaveLength(2);
+    template.resourcePropertiesCountIs(
+      'AWS::ElasticLoadBalancingV2::LoadBalancer',
+      {
+        LoadBalancerAttributes: Match.arrayWith([{ Key: 'access_logs.s3.prefix', Value: 'elb' }]),
+      },
+      2
+    );
+    template.resourcePropertiesCountIs(
+      'AWS::ElasticLoadBalancingV2::LoadBalancer',
+      {
+        LoadBalancerAttributes: Match.arrayWith([
+          { Key: 'access_logs.s3.prefix', Value: baseConfig.loadBalancerLoggingBucket },
+        ]),
+      },
+      0
+    );
   });
 });

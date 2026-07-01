@@ -1,13 +1,18 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { ProfileResource, WithId } from '@medplum/core';
+import type { ProfileResource, TypedValue, WithId } from '@medplum/core';
 import {
   allOk,
+  badRequest,
+  capitalize,
   concatUrls,
   createReference,
+  EMPTY,
   evalFhirPathTyped,
+  getElementDefinition,
   getExtension,
   getReferenceString,
+  OperationOutcomeError,
   Operator,
   toTypedValue,
 } from '@medplum/core';
@@ -85,29 +90,27 @@ export async function planDefinitionApplyHandler(req: FhirRequest): Promise<Fhir
   }
 
   const actions: RequestGroupAction[] = [];
-  if (planDefinition.action) {
-    for (const action of planDefinition.action) {
-      actions.push(
-        await createAction(
-          ctx.repo,
-          planDefinition,
-          ctx.profile,
-          subjectRef,
-          action,
-          encounterRef,
-          practitionerRef,
-          organizationRef
-        )
-      );
-    }
+  for (const action of planDefinition.action ?? EMPTY) {
+    actions.push(
+      await createAction(
+        ctx.repo,
+        planDefinition,
+        ctx.profile,
+        subjectRef,
+        action,
+        encounterRef,
+        practitionerRef,
+        organizationRef
+      )
+    );
   }
 
   const requestGroup = await ctx.repo.createResource<RequestGroup>({
     resourceType: 'RequestGroup',
     instantiatesCanonical: planDefinition.url ? [planDefinition.url] : undefined,
-    instantiatesUri: !planDefinition.url
-      ? [concatUrls(getConfig().baseUrl, getReferenceString(planDefinition))]
-      : undefined,
+    instantiatesUri: planDefinition.url
+      ? undefined
+      : [concatUrls(getConfig().baseUrl, getReferenceString(planDefinition))],
     subject: subjectRef,
     status: 'active',
     intent: 'order',
@@ -121,9 +124,9 @@ export async function planDefinitionApplyHandler(req: FhirRequest): Promise<Fhir
     subject: subjectRef,
     intent: 'plan',
     instantiatesCanonical: planDefinition.url ? [planDefinition.url] : undefined,
-    instantiatesUri: !planDefinition.url
-      ? [concatUrls(getConfig().baseUrl, getReferenceString(planDefinition))]
-      : undefined,
+    instantiatesUri: planDefinition.url
+      ? undefined
+      : [concatUrls(getConfig().baseUrl, getReferenceString(planDefinition))],
     activity: [{ reference: createReference(requestGroup) }],
   });
 
@@ -243,7 +246,7 @@ async function createActivityDefinitionTask(
 
   switch (activityDefinition.kind) {
     case 'ServiceRequest': {
-      const serviceRequest = await repo.createResource({
+      const serviceRequest: ServiceRequest = {
         resourceType: 'ServiceRequest',
         status: 'draft',
         intent: activityDefinition.intent as ServiceRequest['intent'],
@@ -252,7 +255,16 @@ async function createActivityDefinitionTask(
         encounter: encounter,
         code: activityDefinition.code,
         extension: activityDefinition.extension,
+      };
+
+      applyDynamicValues(serviceRequest as unknown as Record<string, unknown>, 'ServiceRequest', activityDefinition, {
+        '%practitioner': toTypedValue(practitioner),
+        '%organization': toTypedValue(organization),
+        '%subject': toTypedValue(subject),
+        '%encounter': toTypedValue(encounter),
       });
+
+      const persisted = await repo.createResource(serviceRequest);
 
       return createTask(repo, planDefinition, requester, subject, action, encounter, owner, performerType, [
         {
@@ -261,7 +273,7 @@ async function createActivityDefinitionTask(
           },
           valueReference: {
             display: action.title,
-            reference: getReferenceString(serviceRequest),
+            reference: getReferenceString(persisted),
           },
         },
       ]);
@@ -323,6 +335,74 @@ async function createTask(
     title: action.title,
     resource: createReference(task),
   };
+}
+
+function applyDynamicValues(
+  target: Record<string, unknown>,
+  resourceType: string,
+  activityDefinition: ActivityDefinition,
+  variables: Record<string, TypedValue>
+): void {
+  for (const dv of activityDefinition.dynamicValue ?? EMPTY) {
+    const expression = dv.expression?.expression;
+    if (!expression || !dv.path) {
+      continue;
+    }
+    const language = dv.expression?.language;
+    if (language && language !== 'text/fhirpath') {
+      throw new OperationOutcomeError(
+        badRequest(
+          `ActivityDefinition.dynamicValue expression uses unsupported language: ${language} (path: ${dv.path})`
+        )
+      );
+    }
+    const result = evalFhirPathTyped(expression, [toTypedValue(target)], variables);
+    setValueAtPath(target, resourceType, dv.path, result);
+  }
+}
+
+function setValueAtPath(
+  target: Record<string, unknown>,
+  resourceType: string,
+  path: string,
+  values: TypedValue[]
+): void {
+  if (values.length === 0) {
+    return;
+  }
+  const pathSegments = path.split('.');
+  let currentNode: Record<string, unknown> = target;
+  let currentFhirType = resourceType;
+  for (let i = 0; i < pathSegments.length - 1; i++) {
+    const segmentKey = pathSegments[i];
+    if (segmentKey === '__proto__' || segmentKey === 'prototype' || segmentKey === 'constructor') {
+      return;
+    }
+    const element = getElementDefinition(currentFhirType, segmentKey);
+    if (!element) {
+      return;
+    }
+    if (currentNode[segmentKey] === undefined) {
+      currentNode[segmentKey] = element.isArray ? [{}] : {};
+    }
+    currentNode = (element.isArray ? (currentNode[segmentKey] as object[])[0] : currentNode[segmentKey]) as Record<
+      string,
+      unknown
+    >;
+    currentFhirType = element.type[0].code;
+  }
+  const finalSegmentKey = pathSegments[pathSegments.length - 1];
+  if (finalSegmentKey === '__proto__' || finalSegmentKey === 'prototype' || finalSegmentKey === 'constructor') {
+    return;
+  }
+  const finalElement = getElementDefinition(currentFhirType, finalSegmentKey);
+  if (!finalElement) {
+    return;
+  }
+  const writeKey = finalSegmentKey.includes('[x]')
+    ? finalSegmentKey.replace('[x]', capitalize(values[0].type))
+    : finalSegmentKey;
+  currentNode[writeKey] = finalElement.isArray ? values.map((v) => v.value) : values[0].value;
 }
 
 async function readCanonical<T extends Questionnaire | ActivityDefinition | PlanDefinition>(

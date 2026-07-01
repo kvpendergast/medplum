@@ -1,5 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
+import { vi } from 'vitest';
 import { MEDPLUM_VERSION } from './client';
 import type { ReleaseManifest } from './version-utils';
 import {
@@ -36,7 +37,13 @@ test('assertReleaseManifest', () => {
     assertReleaseManifest({
       assets: [{ name: 'medplum-agent-3.1.6-linux', browser_download_url: 'https://example.com' }],
     })
-  ).toThrow('Manifest missing tag_name');
+  ).toThrow("Manifest missing valid tag_name starting with a 'v' (eg. v5.1.15)");
+  expect(() =>
+    assertReleaseManifest({
+      tag_name: '3.1.6',
+      assets: [{ name: 'medplum-agent-3.1.6-linux', browser_download_url: 'https://example.com' }],
+    })
+  ).toThrow("Manifest missing valid tag_name starting with a 'v' (eg. v5.1.15)");
   expect(() =>
     assertReleaseManifest({
       tag_name: 'v3.1.6',
@@ -64,7 +71,7 @@ test('assertReleaseManifest', () => {
 
 describe('checkIfValidMedplumVersion', () => {
   beforeAll(() => {
-    globalThis.fetch = jest.fn();
+    globalThis.fetch = vi.fn();
   });
 
   beforeEach(() => {
@@ -76,8 +83,8 @@ describe('checkIfValidMedplumVersion', () => {
   });
 
   test('Version not found', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 404,
           json: async () => {
@@ -92,8 +99,8 @@ describe('checkIfValidMedplumVersion', () => {
   });
 
   test('Version not found', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 404,
           json: async () => {
@@ -107,8 +114,8 @@ describe('checkIfValidMedplumVersion', () => {
   });
 
   test('Network error - fetch throws', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.reject(new Error('Network error'));
       })
     );
@@ -131,9 +138,9 @@ describe('fetchVersionManifest', () => {
           browser_download_url: 'https://example.com',
         },
       ],
-    } as ReleaseManifest;
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 200,
           json: async () => {
@@ -142,12 +149,41 @@ describe('fetchVersionManifest', () => {
         });
       }) as unknown as typeof globalThis.fetch
     );
-    await expect(fetchVersionManifest('test')).resolves.toMatchObject<ReleaseManifest>(manifest);
+    await expect(fetchVersionManifest('test')).resolves.toMatchObject(manifest);
     // Should be called with latest
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining(`${MEDPLUM_RELEASES_URL}/latest.json`));
-    // Call again to make sure we don't refetch
+    // Call again to make sure `latest` is NOT cached and gets refetched
     fetchSpy.mockClear();
-    await expect(fetchVersionManifest('test')).resolves.toMatchObject<ReleaseManifest>(manifest);
+    await expect(fetchVersionManifest('test')).resolves.toMatchObject(manifest);
+    expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining(`${MEDPLUM_RELEASES_URL}/latest.json`));
+    fetchSpy.mockRestore();
+  });
+
+  test('Latest resolves and caches the concrete version', async () => {
+    const manifest = {
+      tag_name: 'v3.1.6',
+      assets: [
+        {
+          name: 'medplum-agent-3.1.6-linux',
+          browser_download_url: 'https://example.com',
+        },
+      ],
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
+        return Promise.resolve({
+          status: 200,
+          json: async () => {
+            return manifest;
+          },
+        });
+      }) as unknown as typeof globalThis.fetch
+    );
+    // Fetching latest resolves to v3.1.6 and caches that concrete version
+    await expect(fetchVersionManifest('test')).resolves.toMatchObject(manifest);
+    // Requesting the concrete version should be served from cache, no refetch
+    fetchSpy.mockClear();
+    await expect(fetchVersionManifest('test', '3.1.6')).resolves.toMatchObject(manifest);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
@@ -161,9 +197,9 @@ describe('fetchVersionManifest', () => {
           browser_download_url: 'https://example.com',
         },
       ],
-    } as ReleaseManifest;
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 200,
           json: async () => {
@@ -172,19 +208,19 @@ describe('fetchVersionManifest', () => {
         });
       }) as unknown as typeof globalThis.fetch
     );
-    await expect(fetchVersionManifest('test', '3.1.6')).resolves.toMatchObject<ReleaseManifest>(manifest);
+    await expect(fetchVersionManifest('test', '3.1.6')).resolves.toMatchObject(manifest);
     // Should be called with version
     expect(fetchSpy).toHaveBeenLastCalledWith(expect.stringContaining(`${MEDPLUM_RELEASES_URL}/v3.1.6.json`));
     // Call again to make sure we don't refetch
     fetchSpy.mockClear();
-    await expect(fetchVersionManifest('test', '3.1.6')).resolves.toMatchObject<ReleaseManifest>(manifest);
+    await expect(fetchVersionManifest('test', '3.1.6')).resolves.toMatchObject(manifest);
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 
   test('Fetch throws -- Network error', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.reject(new Error('Network request failed'));
       })
     );
@@ -193,8 +229,8 @@ describe('fetchVersionManifest', () => {
   });
 
   test('Version not found', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 404,
           json: async () => {
@@ -224,9 +260,9 @@ describe('fetchLatestVersionString', () => {
           browser_download_url: 'https://example.com',
         },
       ],
-    } as ReleaseManifest;
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 200,
           json: async () => {
@@ -248,9 +284,9 @@ describe('fetchLatestVersionString', () => {
           browser_download_url: 'https://example.com',
         },
       ],
-    } as ReleaseManifest;
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    };
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         return Promise.resolve({
           status: 200,
           json: async () => {
@@ -260,7 +296,7 @@ describe('fetchLatestVersionString', () => {
       }) as unknown as typeof globalThis.fetch
     );
     await expect(fetchLatestVersionString('test')).rejects.toThrow(
-      "Invalid release name found. Release tag 'canary' did not start with 'v'"
+      "Manifest missing valid tag_name starting with a 'v' (eg. v5.1.15)"
     );
     fetchSpy.mockRestore();
   });
@@ -272,14 +308,14 @@ describe('warnIfNewerVersionAvailable', () => {
   });
 
   test('Newer version available', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => ({
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => ({
         status: 200,
         json: async () => ({ tag_name: 'v100.0.0', assets: [{ name: 'x', browser_download_url: 'x' }] }),
       })) as unknown as typeof globalThis.fetch
     );
 
-    console.warn = jest.fn();
+    console.warn = vi.fn();
     await warnIfNewerVersionAvailable('test', { foo: 'bar' });
     expect(fetchSpy).toHaveBeenCalledWith(expect.stringContaining(`${MEDPLUM_RELEASES_URL}/latest.json`));
     expect(console.warn).toHaveBeenCalledWith(
@@ -289,27 +325,27 @@ describe('warnIfNewerVersionAvailable', () => {
   });
 
   test('On current version', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => ({
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => ({
         status: 200,
         json: async () => ({ tag_name: 'v' + MEDPLUM_VERSION, assets: [{ name: 'x', browser_download_url: 'x' }] }),
       })) as unknown as typeof globalThis.fetch
     );
 
-    console.warn = jest.fn();
+    console.warn = vi.fn();
     await warnIfNewerVersionAvailable('test');
     expect(console.warn).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
   });
 
   test('On current version', async () => {
-    const fetchSpy = jest.spyOn(globalThis, 'fetch').mockImplementation(
-      jest.fn(async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      vi.fn(async () => {
         throw new Error('Network error');
-      }) as unknown as typeof globalThis.fetch
+      })
     );
 
-    console.warn = jest.fn();
+    console.warn = vi.fn();
     await warnIfNewerVersionAvailable('test');
     expect(console.warn).toHaveBeenCalledWith('Failed to check for newer version: Network error');
     fetchSpy.mockRestore();

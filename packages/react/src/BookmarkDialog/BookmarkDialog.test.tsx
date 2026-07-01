@@ -8,7 +8,7 @@ import { MedplumProvider } from '@medplum/react-hooks';
 import { act, fireEvent, render, screen } from '../test-utils/render';
 import { BookmarkDialog } from './BookmarkDialog';
 
-jest.mock('@mantine/notifications');
+vi.mock('@mantine/notifications');
 
 function getTestUserConfiguration(id: string): WithId<UserConfiguration> {
   return {
@@ -36,18 +36,18 @@ function getTestUserConfiguration(id: string): WithId<UserConfiguration> {
 
 describe('BookmarkDialog', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   test('Render not visible', async () => {
     render(
-      <MedplumProvider medplum={new MockClient()} navigate={jest.fn()}>
+      <MedplumProvider medplum={new MockClient()} navigate={vi.fn()}>
         <BookmarkDialog
           pathname="/"
           searchParams={new URLSearchParams()}
           visible={false}
-          onCancel={jest.fn()}
-          onOk={jest.fn()}
+          onCancel={vi.fn()}
+          onOk={vi.fn()}
         />
       </MedplumProvider>
     );
@@ -61,8 +61,8 @@ describe('BookmarkDialog', () => {
           pathname="/"
           searchParams={new URLSearchParams()}
           visible={true}
-          onCancel={jest.fn()}
-          onOk={jest.fn()}
+          onCancel={vi.fn()}
+          onOk={vi.fn()}
         />
       </MedplumProvider>
     );
@@ -70,10 +70,10 @@ describe('BookmarkDialog', () => {
   });
 
   test('Render and Submit', async () => {
-    const onOk = jest.fn();
+    const onOk = vi.fn();
     const medplum = new MockClient();
 
-    medplum.getUserConfiguration = jest.fn(() => {
+    medplum.getUserConfiguration = vi.fn(() => {
       return getTestUserConfiguration('test-user-config-id');
     });
     render(
@@ -82,12 +82,12 @@ describe('BookmarkDialog', () => {
           pathname="/"
           searchParams={new URLSearchParams()}
           visible={true}
-          onCancel={jest.fn()}
+          onCancel={vi.fn()}
           onOk={onOk}
         />
       </MedplumProvider>
     );
-    const input = screen.getByPlaceholderText('Bookmark Name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Bookmark Name');
 
     // Enter random text
     await act(async () => {
@@ -103,8 +103,8 @@ describe('BookmarkDialog', () => {
   });
 
   test('Render and Cancel', async () => {
-    const onOk = jest.fn();
-    const onCancel = jest.fn();
+    const onOk = vi.fn();
+    const onCancel = vi.fn();
     render(
       <MedplumProvider medplum={new MockClient()}>
         <BookmarkDialog
@@ -116,7 +116,7 @@ describe('BookmarkDialog', () => {
         />
       </MedplumProvider>
     );
-    const input = screen.getByPlaceholderText('Bookmark Name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Bookmark Name');
 
     // Enter random text
     await act(async () => {
@@ -133,11 +133,11 @@ describe('BookmarkDialog', () => {
   });
 
   test('Render and update existing config', async () => {
-    const onOk = jest.fn();
-    const onCancel = jest.fn();
+    const onOk = vi.fn();
+    const onCancel = vi.fn();
     const medplum = new MockClient();
 
-    medplum.getUserConfiguration = jest.fn(() => {
+    medplum.getUserConfiguration = vi.fn(() => {
       return getTestUserConfiguration('test-user-config-id');
     });
 
@@ -152,8 +152,8 @@ describe('BookmarkDialog', () => {
         />
       </MedplumProvider>
     );
-    const menuInput = screen.getByLabelText('Select Menu Option *') as HTMLSelectElement;
-    const bookmarkInput = screen.getByPlaceholderText('Bookmark Name') as HTMLInputElement;
+    const menuInput = screen.getByLabelText('Select Menu Option *');
+    const bookmarkInput = screen.getByPlaceholderText('Bookmark Name');
 
     await act(async () => {
       fireEvent.focus(menuInput);
@@ -184,10 +184,10 @@ describe('BookmarkDialog', () => {
   });
 
   test('Render and update error for empty id', async () => {
-    const onOk = jest.fn();
-    const onCancel = jest.fn();
+    const onOk = vi.fn();
+    const onCancel = vi.fn();
     const medplum = new MockClient();
-    medplum.getUserConfiguration = jest.fn(() => {
+    medplum.getUserConfiguration = vi.fn(() => {
       return getTestUserConfiguration('');
     });
 
@@ -202,8 +202,8 @@ describe('BookmarkDialog', () => {
         />
       </MedplumProvider>
     );
-    const menuInput = screen.getByLabelText('Select Menu Option *') as HTMLSelectElement;
-    const bookmarkInput = screen.getByPlaceholderText('Bookmark Name') as HTMLInputElement;
+    const menuInput = screen.getByLabelText('Select Menu Option *');
+    const bookmarkInput = screen.getByPlaceholderText('Bookmark Name');
 
     await act(async () => {
       fireEvent.focus(menuInput);

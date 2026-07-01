@@ -4,7 +4,6 @@ import { Paper } from '@mantine/core';
 import { showNotification } from '@mantine/notifications';
 import type { SearchRequest } from '@medplum/core';
 import { formatSearchQuery, normalizeErrorString, parseSearchRequest } from '@medplum/core';
-import type { ResourceType } from '@medplum/fhirtypes';
 import { exportJsonFile, Loading, SearchControl, useMedplum } from '@medplum/react';
 import type { JSX } from 'react';
 import { useEffect, useState } from 'react';
@@ -34,7 +33,9 @@ export function HomePage(): JSX.Element {
       setSearch(populatedSearch);
     } else {
       // Otherwise, navigate to the desired URL
-      navigate(`/${populatedSearch.resourceType}${formatSearchQuery(populatedSearch)}`)?.catch(console.error);
+      navigate(`/${populatedSearch.resourceType}${formatSearchQuery(populatedSearch)}`, { replace: true })?.catch(
+        console.error
+      );
     }
   }, [medplum, navigate, location]);
 
@@ -73,7 +74,7 @@ export function HomePage(): JSX.Element {
         }}
         onDelete={(ids: string[]) => {
           if (window.confirm('Are you sure you want to delete these resources?')) {
-            medplum.invalidateSearches(search.resourceType as ResourceType);
+            medplum.invalidateSearches(search.resourceType);
             medplum
               .executeBatch({
                 resourceType: 'Bundle',

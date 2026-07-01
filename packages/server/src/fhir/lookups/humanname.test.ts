@@ -4,16 +4,17 @@ import type { WithId } from '@medplum/core';
 import { formatFamilyName, formatGivenName, formatHumanName, Operator } from '@medplum/core';
 import type { HumanName, Patient, Practitioner, ResourceType, SearchParameter } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
-import type { PoolClient } from 'pg';
+import { vi } from 'vitest';
 import { initAppServices, shutdownApp } from '../../app';
 import { loadTestConfig } from '../../config/loader';
 import { bundleContains, withTestContext } from '../../test.setup';
-import { getSystemRepo } from '../repo';
+import { getGlobalSystemRepo } from '../repo';
+import type { PgQueryable } from '../sql';
 import type { HumanNameTableRow } from './humanname';
 import { getHumanNameSortValue, HumanNameTable } from './humanname';
 
 describe('HumanName Lookup Table', () => {
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
 
   beforeAll(async () => {
     const config = await loadTestConfig();
@@ -42,6 +43,27 @@ describe('HumanName Lookup Table', () => {
             value: name,
           },
         ],
+      });
+      expect(searchResult.entry?.length).toStrictEqual(1);
+      expect(searchResult.entry?.[0]?.resource?.id).toStrictEqual(patient.id);
+    }));
+
+  test('Long given name exceeding btree index limit', () =>
+    withTestContext(async () => {
+      // Given names totaling more than 2704 bytes would previously cause:
+      // "index row size exceeds btree version 4 maximum 2704 for index Patient___givenSort_idx"
+      const longGiven = 'a'.repeat(3000);
+      const family = randomUUID();
+
+      const patient = await systemRepo.createResource<Patient>({
+        resourceType: 'Patient',
+        name: [{ given: [longGiven], family }],
+      });
+      expect(patient.id).toBeDefined();
+
+      const searchResult = await systemRepo.search({
+        resourceType: 'Patient',
+        filters: [{ code: 'family', operator: Operator.EQUALS, value: family }],
       });
       expect(searchResult.entry?.length).toStrictEqual(1);
       expect(searchResult.entry?.[0]?.resource?.id).toStrictEqual(patient.id);
@@ -286,7 +308,7 @@ describe('HumanName Lookup Table', () => {
       expect(descending.entry?.map((e) => e.resource?.id)).toStrictEqual([p3.id, p2.id, p1.id]);
     }));
 
-  test.failing('FAILING Sort by name multi-type', () =>
+  test.fails('FAILING Sort by name multi-type', () =>
     withTestContext(async () => {
       const name = randomUUID();
       const identifier = randomUUID();
@@ -315,7 +337,7 @@ describe('HumanName Lookup Table', () => {
   );
 
   test('Purges related resource type', async () => {
-    const db = { query: jest.fn().mockReturnValue({ rowCount: 0, rows: [] }) } as unknown as PoolClient;
+    const db = { query: vi.fn().mockReturnValue({ rowCount: 0, rows: [] }) } as unknown as PgQueryable;
 
     const table = new HumanNameTable();
     await table.purgeValuesBefore(db, 'Patient', '2024-01-01T00:00:00Z');
@@ -324,7 +346,7 @@ describe('HumanName Lookup Table', () => {
   });
 
   test('Does not purge unrelated resource type', async () => {
-    const db = { query: jest.fn() } as unknown as PoolClient;
+    const db = { query: vi.fn() } as unknown as PgQueryable;
 
     const table = new HumanNameTable();
     await table.purgeValuesBefore(db, 'AuditEvent', '2024-01-01T00:00:00Z');

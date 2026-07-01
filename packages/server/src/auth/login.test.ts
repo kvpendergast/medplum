@@ -4,43 +4,52 @@ import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
 import type { WithId } from '@medplum/core';
 import { createReference, LOINC } from '@medplum/core';
 import type { ClientApplication, Project } from '@medplum/fhirtypes';
+import type { AwsClientStub } from 'aws-sdk-client-mock';
+import { mockClient } from 'aws-sdk-client-mock';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import { pwnedPassword } from 'hibp';
 import { simpleParser } from 'mailparser';
-import fetch from 'node-fetch';
 import request from 'supertest';
+import type { Mock } from 'vitest';
+import { vi } from 'vitest';
 import { inviteUser } from '../admin/invite';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
-import { getSystemRepo } from '../fhir/repo';
+import type { Repository } from '../fhir/repo';
+import { getGlobalSystemRepo, getProjectSystemRepo } from '../fhir/repo';
 import { createTestProject, setupPwnedPasswordMock, setupRecaptchaMock, withTestContext } from '../test.setup';
 import { registerNew } from './register';
 import { setPassword } from './setpassword';
 
-jest.mock('@aws-sdk/client-sesv2');
-jest.mock('hibp');
-jest.mock('node-fetch');
-
+vi.mock('hibp');
+const fetchMock = vi.spyOn(globalThis, 'fetch');
 const app = express();
 const email = randomUUID() + '@example.com';
 const password = randomUUID();
 let project: WithId<Project>;
+let repo: Repository;
 let client: WithId<ClientApplication>;
 let corsClient: WithId<ClientApplication>;
+let mockSESv2Client: AwsClientStub<SESv2Client>;
 
 describe('Login', () => {
   beforeAll(async () => {
+    mockSESv2Client = mockClient(SESv2Client);
+    mockSESv2Client.on(SendEmailCommand).resolves({ MessageId: 'ID_TEST_123' });
+
     const config = await loadTestConfig();
+    const systemRepo = getGlobalSystemRepo();
+
     await withTestContext(async () => {
       config.emailProvider = 'awsses';
       await initApp(app, config);
 
       // Create a test project
-      ({ project, client } = await createTestProject({ withClient: true }));
+      ({ project, client, repo } = await createTestProject({ withClient: true, withRepo: true }));
 
       // Create another client with CORS "allowed origins"
-      corsClient = await getSystemRepo().createResource<ClientApplication>({
+      corsClient = await repo.getSystemRepo().createResource<ClientApplication>({
         resourceType: 'ClientApplication',
         meta: {
           project: project.id,
@@ -61,21 +70,23 @@ describe('Login', () => {
       });
 
       // Set the test user password
-      await setPassword(user, password);
+      await setPassword(systemRepo, user, password);
     });
   });
 
   afterAll(async () => {
+    mockSESv2Client.restore();
     await shutdownApp();
   });
 
   beforeEach(() => {
-    (SESv2Client as unknown as jest.Mock).mockClear();
-    (SendEmailCommand as unknown as jest.Mock).mockClear();
-    (fetch as unknown as jest.Mock).mockClear();
-    (pwnedPassword as unknown as jest.Mock).mockClear();
-    setupPwnedPasswordMock(pwnedPassword as unknown as jest.Mock, 0);
-    setupRecaptchaMock(fetch as unknown as jest.Mock, true);
+    mockSESv2Client.reset();
+    mockSESv2Client.on(SendEmailCommand).resolves({ MessageId: 'ID_TEST_123' });
+
+    fetchMock.mockClear();
+    (pwnedPassword as unknown as Mock).mockClear();
+    setupPwnedPasswordMock(pwnedPassword as unknown as Mock, 0);
+    setupRecaptchaMock(true);
   });
 
   test('Invalid client UUID', async () => {
@@ -130,7 +141,7 @@ describe('Login', () => {
     });
     expect(res.status).toBe(400);
     expect(res.body.issue).toBeDefined();
-    expect(res.body.issue[0].details.text).toBe('Invalid password, must be at least 5 characters');
+    expect(res.body.issue[0].details.text).toBe('Invalid password, must be at least 8 characters');
   });
 
   test('Wrong password', async () => {
@@ -235,12 +246,12 @@ describe('Login', () => {
       });
 
     expect(res2.status).toBe(200);
-    expect(SESv2Client).toHaveBeenCalledTimes(1);
-    expect(SendEmailCommand).toHaveBeenCalledTimes(1);
+    expect(mockSESv2Client.send.callCount).toBe(1);
+    expect(mockSESv2Client.commandCalls(SendEmailCommand)).toHaveLength(1);
 
     // Parse the email for the "set password" link
-    const args = (SendEmailCommand as unknown as jest.Mock).mock.calls[0][0];
-    const parsed = await simpleParser(args.Content.Raw.Data);
+    const args = mockSESv2Client.commandCalls(SendEmailCommand)[0].args[0].input;
+    const parsed = await simpleParser(args.Content?.Raw?.Data as Buffer);
     const content = parsed.text as string;
     const url = /(https?:\/\/[^\s]+)/g.exec(content)?.[0] as string;
     const paths = url.split('/');
@@ -286,7 +297,7 @@ describe('Login', () => {
     const res8 = await request(app).post('/auth/login').type('json').send({
       email: memberEmail,
       password: 'my-new-password',
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -301,7 +312,7 @@ describe('Login', () => {
     });
     expect(res9.status).toBe(200);
     expect(res9.body.token_type).toBe('Bearer');
-    expect(res9.body.scope).toBe('openid offline');
+    expect(res9.body.scope).toBe('openid offline_access');
     expect(res9.body.expires_in).toBe(3600);
     expect(res9.body.id_token).toBeDefined();
     expect(res9.body.access_token).toBeDefined();
@@ -351,7 +362,7 @@ describe('Login', () => {
 
     // Register and create a project
     await withTestContext(async () => {
-      const { project } = await registerNew({
+      const { project: newProject } = await registerNew({
         firstName: 'Google',
         lastName: 'Google',
         projectName: 'Require Google Auth',
@@ -360,9 +371,9 @@ describe('Login', () => {
       });
 
       // As a super admin, update the project to require Google auth
-      const systemRepo = getSystemRepo();
+      const systemRepo = await getProjectSystemRepo(newProject);
       await systemRepo.updateResource({
-        ...project,
+        ...newProject,
         features: ['google-auth-required'],
       });
     });
@@ -372,7 +383,7 @@ describe('Login', () => {
     const res8 = await request(app).post('/auth/login').type('json').send({
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
     });
     expect(res8.status).toBe(400);
     expect(res8.body).toMatchObject({
@@ -415,7 +426,7 @@ describe('Login', () => {
     const res1 = await request(app).post('/auth/login').type('json').send({
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -429,7 +440,7 @@ describe('Login', () => {
       resourceType: 'Practitioner',
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -442,7 +453,7 @@ describe('Login', () => {
       resourceType: 'Patient',
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -471,7 +482,7 @@ describe('Login', () => {
     const res1 = await request(app).post('/auth/login').type('json').send({
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -483,7 +494,7 @@ describe('Login', () => {
     const res2 = await request(app).post('/auth/login').type('json').send({
       email: email.toLowerCase(),
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
     });
@@ -524,13 +535,13 @@ describe('Login', () => {
     );
 
     // Mark the membership as inactive
-    await getSystemRepo().updateResource({ ...membership, active: false });
+    await repo.getSystemRepo().updateResource({ ...membership, active: false });
 
     // User should not be able to login
     const res = await request(app).post('/auth/login').type('json').send({
       email,
       password,
-      scope: 'openid offline',
+      scope: 'openid offline_access',
       codeChallenge: 'xyz',
       codeChallengeMethod: 'plain',
       projectId: project.id,
@@ -539,7 +550,7 @@ describe('Login', () => {
     expect(res.body.login).toBeUndefined();
     expect(res.body.code).toBeUndefined();
     expect(res.body.memberships).toBeUndefined();
-    expect(res.body.issue[0].details.text).toBe('Profile not active');
+    expect(res.body.issue[0].details.text).toBe('User not found');
   });
 
   test('Success with no origin', async () => {

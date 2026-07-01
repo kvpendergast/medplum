@@ -12,8 +12,7 @@ import { ECSClient } from '@aws-sdk/client-ecs';
 import { S3Client } from '@aws-sdk/client-s3';
 import { GetParameterCommand, PutParameterCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts';
-import { normalizeErrorString } from '@medplum/core';
-import fetch from 'node-fetch';
+import { EMPTY, normalizeErrorString } from '@medplum/core';
 import { readdirSync } from 'node:fs';
 import * as semver from 'semver';
 import { getConfigFileName } from '../utils';
@@ -75,10 +74,8 @@ export async function getAllStacks(): Promise<(StackSummary & { StackName: strin
   );
 
   for await (const page of paginator) {
-    if (page.StackSummaries) {
-      for (const stack of page.StackSummaries) {
-        listResult.push(stack);
-      }
+    for (const stack of page.StackSummaries ?? EMPTY) {
+      listResult.push(stack);
     }
   }
 
@@ -146,7 +143,7 @@ async function buildStackDetails(
 
   if (client === cloudFormationClient) {
     result.stack = stack;
-    result.tag = medplumTag.Value as string;
+    result.tag = medplumTag.Value;
   }
 
   for (const resource of stackResources.StackResources) {
@@ -272,12 +269,12 @@ export async function getServerVersions(from?: string): Promise<string[]> {
 export async function writeParameters(
   region: string,
   prefix: string,
-  params: Record<string, string | number>
+  params: Record<string, string | number | boolean | object>
 ): Promise<void> {
   const client = new SSMClient({ region });
   for (const [key, value] of Object.entries(params)) {
     const name = prefix + key;
-    const valueStr = value.toString();
+    const valueStr = typeof value === 'object' ? JSON.stringify(value) : value.toString();
     const existingValue = await readParameter(client, name);
 
     if (existingValue !== undefined && existingValue !== valueStr) {

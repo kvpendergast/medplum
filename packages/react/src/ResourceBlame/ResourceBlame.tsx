@@ -18,7 +18,7 @@ export interface ResourceBlameProps {
 
 export function ResourceBlame(props: ResourceBlameProps): JSX.Element | null {
   const medplum = useMedplum();
-  const [value, setValue] = useState<Bundle | undefined>(props.history);
+  const [value, setValue] = useState(props.history);
 
   useEffect(() => {
     if (!props.history && props.resourceType && props.id) {
@@ -48,6 +48,12 @@ export function ResourceBlame(props: ResourceBlameProps): JSX.Element | null {
                 <>
                   <td className={classes.author} rowSpan={row.span}>
                     <ResourceName value={row.meta.author} link={true} fz="xs" />
+                    {row.meta.onBehalfOf && (
+                      <div className={classes.onBehalfOf}>
+                        {'on behalf of '}
+                        <ResourceName value={row.meta.onBehalfOf} link={true} fz="xs" c="dimmed" />
+                      </div>
+                    )}
                   </td>
                   <td className={classes.dateTime} rowSpan={row.span}>
                     <MedplumLink to={getVersionUrl(resource, row.meta.versionId as string)} fz="xs">

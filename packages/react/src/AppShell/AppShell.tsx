@@ -7,13 +7,19 @@ import type { JSX, ReactNode } from 'react';
 import { Suspense, useState } from 'react';
 import { ErrorBoundary } from '../ErrorBoundary/ErrorBoundary';
 import { Loading } from '../Loading/Loading';
+import type { AppShellAnnouncement } from './AnnouncementBanners';
+import { AnnouncementBanners } from './AnnouncementBanners';
 import classes from './AppShell.module.css';
 import { Header } from './Header';
 import type { NavbarMenu } from './Navbar';
 import { Navbar } from './Navbar';
 
 const OPEN_WIDTH = 250;
-const CLOSED_WIDTH = 70;
+const CLOSED_WIDTH = 59;
+const HEADER_HEIGHT = 60;
+const ANNOUNCEMENT_HEIGHT = 36;
+
+export type { AppShellAnnouncement } from './AnnouncementBanners';
 
 export interface AppShellProps {
   readonly logo: ReactNode;
@@ -26,7 +32,10 @@ export interface AppShellProps {
   readonly displayAddBookmark?: boolean;
   readonly resourceTypeSearchDisabled?: boolean;
   readonly notifications?: ReactNode;
+  readonly announcements?: AppShellAnnouncement[];
   readonly layoutVersion?: 'v1' | 'v2';
+  readonly showLayoutVersionToggle?: boolean;
+  readonly spotlightPatientsOnly?: boolean;
 }
 
 export function AppShell(props: AppShellProps): JSX.Element {
@@ -36,10 +45,35 @@ export function AppShell(props: AppShellProps): JSX.Element {
   );
   const medplum = useMedplum();
   const profile = useMedplumProfile();
+  const [dismissedAnnouncementIds, setDismissedAnnouncementIds] = useState<ReadonlySet<string>>(() => {
+    try {
+      const dismissed = localStorage['appShellDismissedAnnouncements'];
+      return new Set(dismissed ? JSON.parse(dismissed) : []);
+    } catch (_err) {
+      return new Set();
+    }
+  });
+
+  const visibleAnnouncements = props.announcements?.filter(
+    (announcement) => !announcement.id || !dismissedAnnouncementIds.has(announcement.id)
+  );
+  const announcementHeight = visibleAnnouncements?.length ? visibleAnnouncements.length * ANNOUNCEMENT_HEIGHT : 0;
 
   function setNavbarOpenWrapper(open: boolean): void {
     localStorage['navbarOpen'] = open.toString();
     setNavbarOpen(open);
+  }
+
+  function dismissAnnouncement(announcement: AppShellAnnouncement): void {
+    if (announcement.id) {
+      setDismissedAnnouncementIds((dismissedIds) => {
+        const updated = new Set(dismissedIds);
+        updated.add(announcement.id as string);
+        localStorage['appShellDismissedAnnouncements'] = JSON.stringify([...updated]);
+        return updated;
+      });
+    }
+    announcement.onDismiss?.(announcement);
   }
 
   function closeNavbar(): void {
@@ -63,7 +97,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
     // Layout version v2:
     // - No header
     // - Navbar is either open or closed based on state
-    headerProp = { height: 0 };
+    headerProp = { height: announcementHeight };
     navbarProp = {
       width: navbarOpen ? OPEN_WIDTH : CLOSED_WIDTH,
       breakpoint: 0,
@@ -72,7 +106,11 @@ export function AppShell(props: AppShellProps): JSX.Element {
         mobile: !profile,
       },
     };
-    headerComponent = undefined;
+    headerComponent = visibleAnnouncements?.length ? (
+      <MantineAppShell.Header style={{ zIndex: 101 }}>
+        <AnnouncementBanners announcements={visibleAnnouncements} onDismiss={dismissAnnouncement} />
+      </MantineAppShell.Header>
+    ) : undefined;
     navbarComponent = profile ? (
       <Navbar
         logo={props.logo}
@@ -85,13 +123,15 @@ export function AppShell(props: AppShellProps): JSX.Element {
         resourceTypeSearchDisabled={true}
         opened={navbarOpen}
         spotlightEnabled={true}
+        patientsOnly={props.spotlightPatientsOnly}
         userMenuEnabled={true}
         version={props.version}
+        showLayoutVersionToggle={props.showLayoutVersionToggle}
       />
     ) : undefined;
   } else {
     // Default to layout version v1
-    headerProp = { height: 60 };
+    headerProp = { height: HEADER_HEIGHT + announcementHeight };
     navbarProp = {
       width: OPEN_WIDTH,
       breakpoint: 'sm',
@@ -110,6 +150,8 @@ export function AppShell(props: AppShellProps): JSX.Element {
         navbarOpen={navbarOpen}
         navbarToggle={toggleNavbar}
         notifications={props.notifications}
+        announcements={visibleAnnouncements}
+        onDismissAnnouncement={dismissAnnouncement}
       />
     );
     navbarComponent =
@@ -122,6 +164,7 @@ export function AppShell(props: AppShellProps): JSX.Element {
           closeNavbar={closeNavbar}
           displayAddBookmark={props.displayAddBookmark}
           resourceTypeSearchDisabled={props.resourceTypeSearchDisabled}
+          patientsOnly={props.spotlightPatientsOnly}
         />
       ) : undefined;
   }

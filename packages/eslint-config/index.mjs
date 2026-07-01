@@ -7,12 +7,20 @@ import importPlugin from 'eslint-plugin-import';
 import jsdoc from 'eslint-plugin-jsdoc';
 import noOnlyTestsPlugin from 'eslint-plugin-no-only-tests';
 import reactHooks from 'eslint-plugin-react-hooks';
-import reactRefresh from 'eslint-plugin-react-refresh';
+import reactRefreshPlugin from 'eslint-plugin-react-refresh';
+// eslint-disable-next-line import/no-unresolved -- Node resolves this package export; eslint-plugin-import does not.
 import tseslint from 'typescript-eslint';
+import noTransactionCallbackInvokingRepo from './rules/no-transaction-callback-invoking-repo.mjs';
 
 // Workaround for eslint-plugin-header ESLint 9 compatibility issue.
 // See: https://github.com/Stuk/eslint-plugin-header/issues/57#issuecomment-2378485611
 headerPlugin.rules.header.meta.schema = false;
+
+const medplumPlugin = {
+  rules: {
+    'no-transaction-callback-invoking-repo': noTransactionCallbackInvokingRepo,
+  },
+};
 
 /**
  * Core config applies to all source files.
@@ -119,6 +127,13 @@ export const coreConfig = {
       ],
     ],
   },
+  settings: {
+    jsdoc: {
+      tagNamePreference: {
+        default: 'defaultValue',
+      },
+    },
+  },
 };
 
 /**
@@ -140,7 +155,7 @@ export const tsConfig = {
     },
     tseslint.configs.strict,
     reactHooks.configs.flat.recommended,
-    reactRefresh.configs.recommended,
+    reactRefreshPlugin.configs.recommended,
   ],
   plugins: {
     'no-only-tests': noOnlyTestsPlugin,
@@ -171,6 +186,7 @@ export const tsConfig = {
     '@typescript-eslint/no-redundant-type-constituents': 'error',
     '@typescript-eslint/no-unnecessary-boolean-literal-compare': 'error',
     '@typescript-eslint/no-unnecessary-type-arguments': 'error',
+    '@typescript-eslint/no-unnecessary-type-assertion': 'error',
     '@typescript-eslint/no-unsafe-declaration-merging': 'error',
     '@typescript-eslint/no-unsafe-enum-comparison': 'error',
     '@typescript-eslint/prefer-for-of': 'error',
@@ -287,4 +303,23 @@ export const medplumEslintConfig = [
   },
   coreConfig,
   tsConfig,
+  {
+    files: ['packages/fhir-router/**/*.ts', 'packages/server/**/*.ts'],
+    plugins: {
+      medplum: medplumPlugin,
+    },
+    rules: {
+      'medplum/no-transaction-callback-invoking-repo': 'error',
+    },
+  },
+  /**
+   * vite.config.ts and vitest.config.ts are often outside package tsconfig include (e.g. rootDir src);
+   * skip type-aware parsing.
+   *
+   * we don't need type checking for vite.config.ts or vitest.config.ts files
+   */
+  {
+    files: ['**/vite.config.ts', '**/vitest.config.ts'],
+    extends: [tseslint.configs.disableTypeChecked],
+  },
 ];

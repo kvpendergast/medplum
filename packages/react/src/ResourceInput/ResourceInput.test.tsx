@@ -6,7 +6,7 @@ import { MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import { forwardRef } from 'react';
 import type { AsyncAutocompleteOption } from '../AsyncAutocomplete/AsyncAutocomplete';
-import { act, fireEvent, render, screen } from '../test-utils/render';
+import { act, clickAutocompleteOption, fireEvent, render, screen, typeInAutocomplete } from '../test-utils/render';
 import type { ResourceInputProps } from './ResourceInput';
 import { ResourceInput } from './ResourceInput';
 
@@ -22,14 +22,14 @@ function setup(args: ResourceInputProps): void {
 
 describe('ResourceInput', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      vi.runOnlyPendingTimers();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders empty', () => {
@@ -63,23 +63,13 @@ describe('ResourceInput', () => {
       placeholder: 'Test',
     });
 
-    const input = screen.getByPlaceholderText('Test') as HTMLInputElement;
-
-    // Enter "Simpson"
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Simpson' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    expect(screen.getByText('Homer Simpson')).toBeDefined();
+    const input = screen.getByPlaceholderText('Test');
+    await typeInAutocomplete(input, 'Simpson');
+    expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
   });
 
   test('Call onChange', async () => {
-    const onChange = jest.fn();
+    const onChange = vi.fn();
 
     setup({
       resourceType: 'Patient',
@@ -88,29 +78,10 @@ describe('ResourceInput', () => {
       onChange,
     });
 
-    const input = screen.getByPlaceholderText('Test') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Test');
+    await typeInAutocomplete(input, 'Simpson');
+    await clickAutocompleteOption('Homer Simpson');
 
-    // Enter "Simpson"
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Simpson' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Press the down arrow
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' });
-    });
-
-    // Press "Enter"
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
-    });
-
-    expect(screen.getByText('Homer Simpson')).toBeInTheDocument();
     expect(onChange).toHaveBeenCalled();
   });
 
@@ -131,7 +102,7 @@ describe('ResourceInput', () => {
   });
 
   test('Clear button calls onChange', async () => {
-    const onChange = jest.fn();
+    const onChange = vi.fn();
 
     await act(async () => {
       setup({
@@ -158,7 +129,7 @@ describe('ResourceInput', () => {
   });
 
   test('Clear all button calls onChange', async () => {
-    const onChange = jest.fn();
+    const onChange = vi.fn();
 
     await act(async () => {
       setup({
@@ -173,7 +144,7 @@ describe('ResourceInput', () => {
     expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
     expect(screen.getByText('Homer Simpson')).toBeInTheDocument();
 
-    const clearAllButton = screen.getByTitle('Clear all') as HTMLImageElement;
+    const clearAllButton = screen.getByTitle('Clear all');
     expect(clearAllButton).toBeInTheDocument();
 
     await act(async () => {
@@ -202,20 +173,11 @@ describe('ResourceInput', () => {
       name: 'foo',
       placeholder: 'Test',
       itemComponent: MyTestItemComponent,
-      onChange: jest.fn(),
+      onChange: vi.fn(),
     });
 
-    const input = screen.getByPlaceholderText('Test') as HTMLInputElement;
-
-    // Enter "Simpson"
-    await act(async () => {
-      fireEvent.change(input, { target: { value: 'Simpson' } });
-    });
-
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
+    const input = screen.getByPlaceholderText('Test');
+    await typeInAutocomplete(input, 'Simpson');
 
     expect(await screen.findByText('Homer Simpson')).toBeInTheDocument();
     expect(await screen.findByText('742 Evergreen Terrace, Springfield, IL, 12345')).toBeInTheDocument();

@@ -9,15 +9,18 @@
 import {
   ContentType,
   deepClone,
+  EMPTY,
   OAuthGrantType,
   OAuthSigningAlgorithm,
   OAuthTokenAuthMethod,
+  readInteractions,
   splitN,
 } from '@medplum/core';
-import type { AccessPolicy, AccessPolicyResource } from '@medplum/fhirtypes';
+import type { AccessPolicy, AccessPolicyResource, Patient, Reference } from '@medplum/fhirtypes';
 import type { Request, Response } from 'express';
 import qs from 'node:querystring';
 import { getConfig } from '../config/loader';
+import type { AuthState } from '../oauth/middleware';
 import type { PopulatedAccessPolicy } from './accesspolicy';
 
 const smartScopeFormat = /^(patient|user|system)\/(\w+|\*)\.(read|write|c?r?u?d?s?|\*)$/;
@@ -128,12 +131,10 @@ export function smartStylingHandler(_req: Request, res: Response): void {
 export function parseSmartScopes(scope: string | undefined): SmartScope[] {
   const result: SmartScope[] = [];
 
-  if (scope) {
-    for (const scopeTerm of scope.split(' ')) {
-      const parsed = parseSmartScopeString(scopeTerm);
-      if (parsed) {
-        result.push(parsed);
-      }
+  for (const scopeTerm of scope?.split(' ') ?? EMPTY) {
+    const parsed = parseSmartScopeString(scopeTerm);
+    if (parsed) {
+      result.push(parsed);
     }
   }
 
@@ -182,41 +183,48 @@ function normalizeV2ScopeString(str: string): string {
  * If there is no access policy, a new one is created.
  * Otherwise, the AccessPolicy is modified to only include the SMART scopes.
  * @param accessPolicy - The original access policy.
- * @param scope - The OAuth scope string.
- * @returns Updated access policy with the OAuth scope applied.
+ * @param authState - The user's authentication state.
+ * @returns Updated access policy with the OAuth scope(s) applied.
  */
-export function applySmartScopes(
-  accessPolicy: PopulatedAccessPolicy,
-  scope: string | undefined
-): PopulatedAccessPolicy {
+export function applySmartScopes(accessPolicy: PopulatedAccessPolicy, authState: AuthState): PopulatedAccessPolicy {
+  const scope = authState.login.scope;
   const smartScopes = parseSmartScopes(scope);
   if (smartScopes.length === 0) {
     // No SMART scopes, so no changes to the access policy
     return accessPolicy;
   }
-
-  // Build an access policy that is the intersection of the existing access policy and the SMART scopes
-  return intersectSmartScopes(accessPolicy, smartScopes);
-}
-
-function intersectSmartScopes(accessPolicy: AccessPolicy, smartScope: SmartScope[]): PopulatedAccessPolicy {
-  // Build list of AccessPolicy entries
-  if (!accessPolicy.resource) {
-    // If none specified, generate an AccessPolicy from scratch
-    return generateSmartScopesPolicy(smartScope);
+  let context: Reference<Patient> | undefined;
+  if (authState.smartAppLaunch?.patient) {
+    context = authState.smartAppLaunch?.patient;
+  } else if (authState.membership.profile.reference?.startsWith('Patient/')) {
+    context = authState.membership.profile as Reference<Patient>;
   }
 
+  // Build an access policy that is the intersection of the existing access policy and the SMART scopes
+  return intersectSmartScopes(accessPolicy, smartScopes, context);
+}
+
+function intersectSmartScopes(
+  accessPolicy: AccessPolicy,
+  smartScope: SmartScope[],
+  context?: Reference<Patient>
+): PopulatedAccessPolicy {
   const result: PopulatedAccessPolicy = { ...accessPolicy, resource: [] };
-  for (const policy of accessPolicy.resource) {
-    const scope = getScopeForResourceType(smartScope, policy.resourceType);
-    if (scope) {
-      const merged = mergeAccessPolicyWithScope(policy, scope);
-      result.resource.push(merged);
-    } else if (policy.resourceType === '*') {
+  for (const policy of accessPolicy.resource ?? EMPTY) {
+    if (policy.resourceType === '*') {
       for (const scope of smartScope) {
-        const merged = mergeAccessPolicyWithScope(policy, scope);
-        merged.resourceType = scope.resourceType;
-        result.resource.push(merged);
+        const merged = mergeAccessPolicyWithScope(policy, scope, context);
+        if (merged) {
+          merged.resourceType = scope.resourceType;
+          result.resource.push(merged);
+        }
+      }
+    } else {
+      for (const scope of getScopesForResourceType(smartScope, policy.resourceType)) {
+        const merged = mergeAccessPolicyWithScope(policy, scope, context);
+        if (merged) {
+          result.resource.push(merged);
+        }
       }
     }
   }
@@ -224,36 +232,44 @@ function intersectSmartScopes(accessPolicy: AccessPolicy, smartScope: SmartScope
 }
 
 const readOnlyScope = /^[rs]+$/;
-function mergeAccessPolicyWithScope(policy: AccessPolicyResource, scope: SmartScope): AccessPolicyResource {
+function mergeAccessPolicyWithScope(
+  policy: AccessPolicyResource,
+  scope: SmartScope,
+  context?: Reference<Patient>
+): AccessPolicyResource | undefined {
   const result = deepClone(policy);
   if (result.criteria?.startsWith('*') && scope.resourceType !== '*') {
     result.criteria = result.criteria.replace('*', scope.resourceType);
   }
 
-  if (scope.scope.match(readOnlyScope)) {
+  if (readOnlyScope.exec(scope.scope)) {
     result.readonly = true;
+    result.interaction = result.interaction?.filter((interaction) => readInteractions.includes(interaction));
+    if (result.interaction?.length === 0) {
+      return undefined;
+    }
   }
   if (scope.criteria) {
-    result.criteria = `${result.criteria ?? scope.resourceType + '?'}${result.criteria && !result.criteria?.endsWith('&') ? '&' : ''}${scope.criteria}`;
+    appendCriteria(result, scope.criteria);
+  }
+  if (scope.permissionType === 'patient') {
+    if (context) {
+      appendCriteria(result, `_compartment=${context.reference}`);
+    }
   }
   return result;
 }
 
-function getScopeForResourceType(scopes: SmartScope[], resourceType: string): SmartScope | undefined {
-  return scopes.find((s) => s.resourceType === resourceType) ?? scopes.find((s) => s.resourceType === '*');
+function appendCriteria(policy: AccessPolicyResource, criteria: string): void {
+  if (!policy.criteria) {
+    policy.criteria = `${policy.resourceType}?${criteria}`;
+  } else if (policy.criteria.endsWith('&')) {
+    policy.criteria += criteria;
+  } else {
+    policy.criteria += '&' + criteria;
+  }
 }
 
-function generateSmartScopesPolicy(smartScopes: SmartScope[]): PopulatedAccessPolicy {
-  const result: PopulatedAccessPolicy = {
-    resourceType: 'AccessPolicy',
-    resource: [],
-  };
-
-  for (const smartScope of smartScopes) {
-    (result.resource as AccessPolicyResource[]).push({
-      resourceType: smartScope.resourceType,
-    });
-  }
-
-  return result;
+function getScopesForResourceType(scopes: SmartScope[], resourceType: string): SmartScope[] {
+  return scopes.filter((s) => s.resourceType === resourceType || s.resourceType === '*');
 }

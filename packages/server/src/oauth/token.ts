@@ -1,6 +1,6 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { ProfileResource, WithId } from '@medplum/core';
+import type { JWTPayload, Operation, ProfileResource, WithId } from '@medplum/core';
 import {
   ContentType,
   OAuthClientAssertionType,
@@ -11,22 +11,31 @@ import {
   createReference,
   getStatus,
   isJwt,
+  isString,
   normalizeErrorString,
   normalizeOperationOutcome,
   parseJWTPayload,
   resolveId,
 } from '@medplum/core';
-import type { ClientApplication, Login, Project, ProjectMembership, Reference, User } from '@medplum/fhirtypes';
+import type {
+  ClientApplication,
+  IdentityProvider,
+  Login,
+  ProjectMembership,
+  Reference,
+  User,
+} from '@medplum/fhirtypes';
 import type { Request, RequestHandler, Response } from 'express';
 import type { JWTVerifyOptions } from 'jose';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { getUserConfiguration } from '../auth/me';
 import { getProjectIdByClientId } from '../auth/utils';
 import { getConfig } from '../config/loader';
 import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
-import { getSystemRepo } from '../fhir/repo';
+import { getGlobalSystemRepo } from '../fhir/repo';
 import { getTopicForUser } from '../fhircast/utils';
+import { validateClientCert } from './cert';
 import type { MedplumRefreshTokenClaims } from './keys';
 import { generateSecret, verifyJwt } from './keys';
 import {
@@ -82,6 +91,9 @@ export const tokenHandler: RequestHandler = async (req: Request, res: Response):
     case OAuthGrantType.TokenExchange:
       await handleTokenExchange(req, res);
       break;
+    case OAuthGrantType.PreAuthorizedCode:
+      await handlePreAuthorizedCode(req, res);
+      break;
     default:
       sendTokenError(res, 'invalid_request', 'Unsupported grant_type');
   }
@@ -110,11 +122,11 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     return;
   }
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   let client: WithId<ClientApplication>;
   try {
     client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-  } catch (_err) {
+  } catch {
     sendTokenError(res, 'invalid_request', 'Invalid client');
     return;
   }
@@ -128,13 +140,13 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     return;
   }
 
-  const membership = await getClientApplicationMembership(client);
+  const membership = await getClientApplicationMembership(systemRepo, client);
   if (!membership) {
     sendTokenError(res, 'invalid_request', 'Invalid client');
     return;
   }
 
-  const project = await systemRepo.readReference(membership.project as Reference<Project>);
+  const project = await systemRepo.readReference(membership.project);
   const scope = (req.body.scope || 'openid') as string;
 
   const login = await systemRepo.createResource<Login>({
@@ -183,7 +195,7 @@ async function handleAuthorizationCode(req: Request, res: Response): Promise<voi
     return;
   }
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   const searchResult = await systemRepo.search({
     resourceType: 'Login',
     filters: [
@@ -213,7 +225,7 @@ async function handleAuthorizationCode(req: Request, res: Response): Promise<voi
   }
 
   if (login.granted) {
-    await revokeLogin(login);
+    await revokeLogin(systemRepo, login);
     sendTokenError(res, 'invalid_grant', 'Token already granted');
     return;
   }
@@ -230,7 +242,7 @@ async function handleAuthorizationCode(req: Request, res: Response): Promise<voi
     } else if (login.client) {
       client = await getClientApplication(resolveId(login.client) as string);
     }
-  } catch (_err) {
+  } catch {
     sendTokenError(res, 'invalid_request', 'Invalid client');
     return;
   }
@@ -276,12 +288,12 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
   let claims: MedplumRefreshTokenClaims;
   try {
     claims = (await verifyJwt(refreshToken)).payload as MedplumRefreshTokenClaims;
-  } catch (_err) {
+  } catch {
     sendTokenError(res, 'invalid_request', 'Invalid refresh token');
     return;
   }
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   const login = await systemRepo.readResource<Login>('Login', claims.login_id);
 
   if (login.refreshSecret === undefined || !claims.refresh_secret) {
@@ -293,6 +305,14 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
   if (login.revoked) {
     sendTokenError(res, 'invalid_grant', 'Token revoked');
     return;
+  }
+
+  if (login.membership) {
+    const membership = await systemRepo.readReference<ProjectMembership>(login.membership);
+    if (membership.active === false) {
+      sendTokenError(res, 'access_denied', 'Profile not active');
+      return;
+    }
   }
 
   // Use a timing-safe-equal here so that we don't expose timing information which could be
@@ -326,7 +346,7 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
     const clientId = resolveId(login.client) ?? '';
     try {
       client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-    } catch (_err) {
+    } catch {
       sendTokenError(res, 'invalid_request', 'Invalid client');
       return;
     }
@@ -334,14 +354,45 @@ async function handleRefreshToken(req: Request, res: Response): Promise<void> {
 
   // Refresh token rotation
   // Generate a new refresh secret and update the login
-  const updatedLogin = await systemRepo.updateResource<Login>({
-    ...login,
-    refreshSecret: generateSecret(32),
+  const updatedLogin = await rotateLoginRefreshSecret(login, {
     remoteAddress: req.ip,
     userAgent: req.get('User-Agent'),
   });
 
   await sendTokenResponse(res, updatedLogin, client);
+}
+
+/**
+ * Rotates a login's refresh secret as part of refresh-token rotation.
+ *
+ * The rotation is applied via `patchResource` rather than a full
+ * `updateResource` of a `{ ...login }` snapshot. `patchResource` re-reads the
+ * login inside its own transaction and mutates only the patched fields, so it
+ * cannot drop fields that a concurrent request set after the caller's read — in
+ * particular the single-use email-MFA challenge code on `login.emailMfa`, which
+ * is written by `/send-email-challenge` and read by `/enroll`. A full overwrite
+ * of a stale snapshot would clobber it, making the user's subsequent code
+ * submission fail with a spurious "Invalid token" while enrolling in email MFA.
+ *
+ * @param login - The login to rotate; only its `id` is authoritative.
+ * @param details - Request metadata to record on the login.
+ * @param details.remoteAddress - The client IP address to record, if any.
+ * @param details.userAgent - The client user agent to record, if any.
+ * @returns The updated login with a freshly rotated refresh secret.
+ */
+export async function rotateLoginRefreshSecret(
+  login: WithId<Login>,
+  details?: { remoteAddress?: string; userAgent?: string }
+): Promise<WithId<Login>> {
+  const systemRepo = getGlobalSystemRepo();
+  const patch: Operation[] = [{ op: 'add', path: '/refreshSecret', value: generateSecret(32) }];
+  if (details?.remoteAddress !== undefined) {
+    patch.push({ op: 'add', path: '/remoteAddress', value: details.remoteAddress });
+  }
+  if (details?.userAgent !== undefined) {
+    patch.push({ op: 'add', path: '/userAgent', value: details.userAgent });
+  }
+  return systemRepo.patchResource<Login>('Login', login.id, patch);
 }
 
 /**
@@ -380,60 +431,241 @@ export async function exchangeExternalAuthToken(
   subjectTokenType: OAuthTokenType,
   membershipId?: string
 ): Promise<void> {
-  if (!clientId) {
-    sendTokenError(res, 'invalid_request', 'Invalid client');
+  if (!validateExternalAuthTokenExchangeRequest(res, clientId, subjectToken, subjectTokenType)) {
     return;
   }
 
-  if (!subjectToken) {
-    sendTokenError(res, 'invalid_request', 'Invalid subject_token');
-    return;
+  const systemRepo = getGlobalSystemRepo();
+  let client: ClientApplication | undefined;
+  // Server external auth providers are selected before ClientApplication lookup.
+  let idp = resolveExternalAuthProvider(clientId);
+  const useServerExternalAuth = !!idp;
+
+  if (!idp) {
+    client = await tryReadTokenExchangeClient(systemRepo, clientId);
+    if (!client) {
+      sendTokenError(res, 'invalid_request', 'Invalid client');
+      return;
+    }
+
+    idp = resolveExternalAuthProvider(clientId, client);
   }
 
-  if (subjectTokenType !== OAuthTokenType.AccessToken) {
-    sendTokenError(res, 'invalid_request', 'Invalid subject_token_type');
-    return;
-  }
-
-  const systemRepo = getSystemRepo();
-  const projectId = await getProjectIdByClientId(clientId, undefined);
-  const client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-  const idp = client.identityProvider;
   if (!idp) {
     sendTokenError(res, 'invalid_request', 'Invalid client');
     return;
   }
 
-  let userInfo;
-  try {
-    userInfo = await getExternalUserInfo(idp.userInfoUrl, subjectToken, idp);
-  } catch (err: any) {
-    const outcome = normalizeOperationOutcome(err);
-    sendTokenError(res, 'invalid_request', normalizeErrorString(err), getStatus(outcome));
+  let projectId: string | undefined;
+  if (useServerExternalAuth) {
+    if (membershipId) {
+      let membership: ProjectMembership;
+      try {
+        membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', membershipId);
+      } catch {
+        sendTokenError(res, 'invalid_request', 'Invalid membership');
+        return;
+      }
+
+      projectId = resolveId(membership.project);
+      if (!projectId) {
+        sendTokenError(res, 'invalid_request', 'Invalid membership');
+        return;
+      }
+    }
+  } else {
+    projectId = await getProjectIdByClientId(clientId, undefined);
+  }
+
+  const userInfo = await tryGetExternalUserInfo(res, idp, subjectToken);
+  if (!userInfo) {
     return;
   }
 
-  let email: string | undefined = undefined;
-  let externalId: string | undefined = undefined;
-  if (idp.useSubject) {
-    externalId = userInfo.sub as string;
-  } else {
-    email = userInfo.email as string;
-  }
-
+  const { email, externalId } = getExternalAuthLoginIdentity(idp, userInfo);
   const login = await tryLogin({
     authMethod: 'exchange',
     email,
     externalId,
     projectId,
-    clientId,
-    scope: req.body.scope || 'openid offline',
+    clientId: client?.id,
+    scope: req.body.scope || 'openid offline_access',
     nonce: req.body.nonce || randomUUID(),
     remoteAddress: req.ip,
     userAgent: req.get('User-Agent'),
     forceUseFirstMembership: true,
     membershipId,
   });
+
+  await sendTokenResponse(res, login, client);
+}
+
+function validateExternalAuthTokenExchangeRequest(
+  res: Response,
+  clientId: string,
+  subjectToken: string,
+  subjectTokenType: OAuthTokenType
+): boolean {
+  if (!clientId) {
+    sendTokenError(res, 'invalid_request', 'Invalid client');
+    return false;
+  }
+
+  if (!subjectToken) {
+    sendTokenError(res, 'invalid_request', 'Invalid subject_token');
+    return false;
+  }
+
+  if (subjectTokenType !== OAuthTokenType.AccessToken) {
+    sendTokenError(res, 'invalid_request', 'Invalid subject_token_type');
+    return false;
+  }
+
+  return true;
+}
+
+async function tryReadTokenExchangeClient(
+  systemRepo: ReturnType<typeof getGlobalSystemRepo>,
+  clientId: string
+): Promise<ClientApplication | undefined> {
+  try {
+    return await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+  } catch {
+    return undefined;
+  }
+}
+
+async function tryGetExternalUserInfo(
+  res: Response,
+  idp: IdentityProvider,
+  subjectToken: string
+): Promise<JWTPayload | undefined> {
+  try {
+    return await getExternalUserInfo(idp.userInfoUrl, subjectToken, idp);
+  } catch (err: any) {
+    const outcome = normalizeOperationOutcome(err);
+    sendTokenError(res, 'invalid_request', normalizeErrorString(err), getStatus(outcome));
+    return undefined;
+  }
+}
+
+function getExternalAuthLoginIdentity(
+  idp: IdentityProvider,
+  userInfo: JWTPayload
+): { email?: string; externalId?: string } {
+  if (idp.useSubject) {
+    return { externalId: userInfo.sub };
+  }
+
+  return { email: userInfo.email as string };
+}
+
+function resolveExternalAuthProvider(clientId: string, client?: ClientApplication): IdentityProvider | undefined {
+  const externalAuthConfig = getConfig().externalAuthProviders?.find(
+    (provider) => (provider.clientId ?? provider.identityProvider?.clientId) === clientId
+  );
+  if (externalAuthConfig) {
+    if (externalAuthConfig.identityProvider) {
+      return externalAuthConfig.identityProvider;
+    }
+
+    const userInfoUrl = externalAuthConfig.userInfoUrl;
+    if (userInfoUrl) {
+      return { userInfoUrl } as IdentityProvider;
+    }
+  }
+
+  return client?.identityProvider;
+}
+
+/**
+ * Handles the "Pre-Authorized Code Grant" flow.
+ * See: https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html#name-urnietfparamsoauthgrant-typ
+ * @param req - The HTTP request.
+ * @param res - The HTTP response.
+ */
+async function handlePreAuthorizedCode(req: Request, res: Response): Promise<void> {
+  const clientId = req.body.client_id;
+  if (!isString(clientId)) {
+    sendTokenError(res, 'invalid_request', 'Missing client_id');
+    return;
+  }
+
+  const preAuthorizedCode = req.body['pre-authorized_code'];
+  if (!isString(preAuthorizedCode)) {
+    sendTokenError(res, 'invalid_request', 'Missing pre-authorized_code');
+    return;
+  }
+
+  let client;
+  try {
+    client = await getClientApplication(clientId);
+  } catch {
+    sendTokenError(res, 'invalid_client', 'Invalid client');
+    return;
+  }
+  if (client.status && client.status !== 'active') {
+    sendTokenError(res, 'invalid_request', 'Invalid client');
+    return;
+  }
+
+  const systemRepo = getGlobalSystemRepo();
+  const searchResult = await systemRepo.search<Login>({
+    resourceType: 'Login',
+    filters: [
+      {
+        code: 'pre-authorized-code-hash',
+        operator: Operator.EQUALS,
+        value: createHash('sha256').update(preAuthorizedCode).digest('hex'),
+      },
+    ],
+  });
+
+  const login = searchResult?.entry?.[0]?.resource;
+  if (login?.authMethod !== 'pre-authorized') {
+    sendTokenError(res, 'invalid_request', 'Invalid pre-authorized_code');
+    return;
+  }
+
+  if (login.client?.reference !== `ClientApplication/${clientId}`) {
+    sendTokenError(res, 'invalid_request', 'Invalid client');
+    return;
+  }
+
+  if (!login.membership) {
+    sendTokenError(res, 'invalid_request', 'Invalid profile');
+    return;
+  }
+
+  if (!login.expiresAt || new Date(login.expiresAt) < new Date()) {
+    sendTokenError(res, 'invalid_grant', 'Pre-authorized code expired');
+    return;
+  }
+
+  if (login.granted) {
+    await revokeLogin(systemRepo, login);
+    sendTokenError(res, 'invalid_grant', 'Token already granted');
+    return;
+  }
+
+  if (login.revoked) {
+    sendTokenError(res, 'invalid_grant', 'Token revoked');
+    return;
+  }
+
+  login.remoteAddress = req.ip;
+  login.userAgent = req.get('User-Agent');
+
+  try {
+    const membership = await systemRepo.readReference(login.membership);
+    const project = await systemRepo.readReference(membership.project);
+    const userConfig = await getUserConfiguration(systemRepo, project, membership);
+    const accessPolicy = await getAccessPolicyForLogin({ project, login, membership, userConfig });
+    await checkIpAccessRules(login, accessPolicy);
+  } catch (err) {
+    sendTokenError(res, 'invalid_request', normalizeErrorString(err));
+    return;
+  }
 
   await sendTokenResponse(res, login, client);
 }
@@ -458,6 +690,14 @@ async function getClientIdAndSecret(req: Request): Promise<ClientIdAndSecret> {
   const authHeader = req.headers.authorization;
   if (authHeader) {
     return parseAuthorizationHeader(authHeader);
+  }
+
+  const mtlsHeaderName = getConfig().mtlsCertHeader;
+  if (mtlsHeaderName) {
+    const mtlsHeader = req.headers[mtlsHeaderName];
+    if (mtlsHeader) {
+      return parseMtlsClientCertificate(req, mtlsHeader);
+    }
   }
 
   return {
@@ -508,12 +748,12 @@ async function parseClientAssertion(
     return { error: 'Invalid client assertion issuer' };
   }
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   const clientId = claims.iss as string;
   let client: ClientApplication;
   try {
     client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-  } catch (_err) {
+  } catch {
     return { error: 'Client not found' };
   }
 
@@ -540,7 +780,7 @@ async function parseClientAssertion(
     await jwtVerify(clientAssertion, JWKS, verifyOptions);
   } catch (error: any) {
     // There are some edge cases where there are multiple matching JWKS
-    // and we need to iterate throught the JWKSMultipleMatchingKeys error
+    // and we need to iterate through the JWKSMultipleMatchingKeys error
     // and return the first verified match
     if (error?.code === 'ERR_JWKS_MULTIPLE_MATCHING_KEYS') {
       return verifyMultipleMatchingException(error, clientId, clientAssertion, verifyOptions, client);
@@ -565,6 +805,43 @@ async function parseAuthorizationHeader(authHeader: string): Promise<ClientIdAnd
   const credentials = Buffer.from(base64Credentials, 'base64').toString('ascii');
   const [clientId, clientSecret] = credentials.split(':');
   return { clientId, clientSecret };
+}
+
+/**
+ * Tries to parse the client ID and secret from the mTLS client certificate header.
+ * @param req - The HTTP request with the mTLS client certificate header.
+ * @param encodedHeader - The URL encoded mTLS client certificate header.
+ * @returns Client ID and secret on success, or an error message on failure.
+ */
+async function parseMtlsClientCertificate(req: Request, encodedHeader: string | string[]): Promise<ClientIdAndSecret> {
+  if (Array.isArray(encodedHeader)) {
+    return { error: 'Invalid mTLS client certificate header' };
+  }
+
+  const systemRepo = getGlobalSystemRepo();
+  const clientId = req.body.client_id;
+  let client: ClientApplication;
+  try {
+    client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+  } catch (err) {
+    return { error: `Error reading client: ${normalizeErrorString(err)}` };
+  }
+
+  if (!client.certificateTrustStore) {
+    return { error: 'Client does not have a configured certificate trust store' };
+  }
+
+  try {
+    const decodedCert = decodeURIComponent(encodedHeader);
+    validateClientCert(decodedCert, client.certificateTrustStore);
+  } catch (err) {
+    return { error: `Invalid client certificate: ${normalizeErrorString(err)}` };
+  }
+
+  return {
+    clientId,
+    clientSecret: client.secret,
+  };
 }
 
 async function validateClientIdAndSecret(
@@ -608,7 +885,7 @@ async function validateClientIdAndSecret(
 async function sendTokenResponse(res: Response, login: WithId<Login>, client?: ClientApplication): Promise<void> {
   const config = getConfig();
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   const user = await systemRepo.readReference<User>(login.user as Reference<User>);
   const membership = await systemRepo.readReference<ProjectMembership>(
     login.membership as Reference<ProjectMembership>
@@ -620,11 +897,15 @@ async function sendTokenResponse(res: Response, login: WithId<Login>, client?: C
   });
   let patient = undefined;
   let encounter = undefined;
+  let fhirContext = undefined;
 
   if (login.launch) {
     const launch = await systemRepo.readReference(login.launch);
-    patient = resolveId(launch.patient);
-    encounter = resolveId(launch.encounter);
+    // Prefer identifier.value if present (for SMART apps that need a specific external identifier),
+    // otherwise fall back to the FHIR resource ID
+    patient = launch.patient?.identifier?.value ?? resolveId(launch.patient);
+    encounter = launch.encounter?.identifier?.value ?? resolveId(launch.encounter);
+    fhirContext = launch.fhirContext;
   }
 
   if (membership.profile?.reference?.startsWith('Patient/')) {
@@ -658,6 +939,7 @@ async function sendTokenResponse(res: Response, login: WithId<Login>, client?: C
     profile: membership.profile,
     patient,
     encounter,
+    fhirContext,
     smart_style_url: config.baseUrl + 'fhir/R4/.well-known/smart-styles.json',
     need_patient_banner: !!patient,
     ...fhircastProps, // Spreads no props when FHIRcast scopes not present

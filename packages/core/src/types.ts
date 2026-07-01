@@ -15,7 +15,7 @@ import { formatHumanName } from './format';
 import type { SearchParameterDetails } from './search/details';
 import type { InternalSchemaElement, InternalTypeSchema } from './typeschema/types';
 import { getAllDataTypes, tryGetDataType } from './typeschema/types';
-import { capitalize, getReferenceString, isResourceWithId } from './utils';
+import { capitalize, EMPTY, getReferenceString, isResourceWithId } from './utils';
 
 export type TypeName<T> = T extends string
   ? 'string'
@@ -152,7 +152,7 @@ export interface TypeInfo {
  * @see {@link IndexedStructureDefinition} for more details on indexed StructureDefinitions.
  */
 export function indexSearchParameterBundle(bundle: Bundle<SearchParameter>): void {
-  for (const entry of bundle.entry ?? []) {
+  for (const entry of bundle.entry ?? EMPTY) {
     const resource = entry.resource as SearchParameter;
     if (resource.resourceType === 'SearchParameter') {
       indexSearchParameter(resource);
@@ -174,7 +174,7 @@ function getOrInitTypeSchema(resourceType: string): TypeInfo {
   if (!typeSchema) {
     typeSchema = {
       searchParamsDetails: {},
-    } as TypeInfo;
+    };
     globalSchema.types[resourceType] = typeSchema;
   }
 
@@ -223,6 +223,12 @@ function getOrInitTypeSchema(resourceType: string): TypeInfo {
         type: 'token',
         expression: resourceType + '.meta.tag',
       } as SearchParameter,
+      _project: {
+        base: [resourceType],
+        code: '_project',
+        type: 'token', // Intentionally use `token`, similar to `_id`
+        expression: resourceType + '.meta.project',
+      } as SearchParameter,
     };
   }
 
@@ -236,14 +242,14 @@ function getOrInitTypeSchema(resourceType: string): TypeInfo {
  * @see {@link IndexedStructureDefinition} for more details on indexed StructureDefinitions.
  */
 export function indexSearchParameter(searchParam: SearchParameter): void {
-  for (const resourceType of searchParam.base ?? []) {
+  for (const resourceType of searchParam.base ?? EMPTY) {
     const typeSchema = getOrInitTypeSchema(resourceType);
 
     if (!typeSchema.searchParams) {
       typeSchema.searchParams = {};
     }
 
-    typeSchema.searchParams[searchParam.code as string] = searchParam;
+    typeSchema.searchParams[searchParam.code] = searchParam;
   }
 }
 
@@ -255,7 +261,7 @@ export function indexSearchParameter(searchParam: SearchParameter): void {
 export function getElementDefinitionTypeName(elementDefinition: ElementDefinition): string {
   const code = elementDefinition.type?.[0]?.code as string;
   return code === 'BackboneElement' || code === 'Element'
-    ? buildTypeName((elementDefinition.base?.path ?? elementDefinition.path)?.split('.') as string[])
+    ? buildTypeName((elementDefinition.base?.path ?? elementDefinition.path)?.split('.'))
     : code;
 }
 
@@ -424,6 +430,42 @@ export function getElementDefinitionFromElements(
 
   // Otherwise, no matches.
   return undefined;
+}
+
+export function getElementDefinitionForPath(
+  typeName: string,
+  path: string,
+  profileUrl?: string
+): InternalSchemaElement | undefined {
+  const pathParts = path.split(/[.[\]]/g);
+  const baseSchema = tryGetDataType(typeName, profileUrl);
+  if (!baseSchema) {
+    return undefined;
+  }
+
+  let currentType = baseSchema;
+  let currentElement: InternalSchemaElement | undefined;
+  for (const segment of pathParts) {
+    let next: InternalTypeSchema | undefined;
+    if (segment.match(/^[a-z]/)) {
+      const element = getElementDefinitionFromElements(currentType.elements, segment);
+      if (!element) {
+        return undefined;
+      }
+      if (element.type.length > 1) {
+        throw new Error('Multiple matching types in path ' + path);
+      }
+
+      next = tryGetDataType(element.type[0].code);
+      currentElement = element;
+    }
+
+    if (next) {
+      currentType = next;
+    }
+  }
+
+  return currentElement;
 }
 
 /**

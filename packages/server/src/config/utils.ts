@@ -38,15 +38,20 @@ export function addDefaults(config: MedplumServerConfig): ServerConfig {
   config.defaultProjectSystemSetting ??= [];
   config.emailProvider ||= config.smtp ? 'smtp' : 'awsses';
   config.autoDownloadEnabled ??= true;
-
+  config.base64BinaryMaxBytes ??= 1 * 1024 * 1024; // 1 MB default cap for base64Binary
+  config.inlineAttachmentsMaxTotalBytes ??= 0;
   // History:
   // Before, the default "auth rate limit" was 600 per 15 minutes, but used "MemoryStore" rather than "RedisStore"
   // That meant that the rate limit was per server instance, rather than per server cluster
   // The value was primarily tuned for one particular cluster with 6 server instances
   // Therefore, to maintain parity, the new default "auth rate limit" is 1200 per 15 minutes
+  config.rateLimitsEnabled ??= true;
   config.defaultRateLimit ??= 60_000;
   config.defaultAuthRateLimit ??= 160;
   config.defaultFhirQuota ??= 50_000;
+  config.defaultMaxUserWebSocketSubscriptions ??= 20;
+  config.asyncDelayScaling ??= 5;
+  config.aiRealtimeTranscriptionUrl ??= 'wss://api.openai.com/v1/realtime?intent=transcription';
 
   // Automatically generate a signing key if using built-in storage and no signing key is provided
   if (config.storageBaseUrl.startsWith(config.baseUrl) && !config.signingKey) {
@@ -90,20 +95,27 @@ type DefaultConfigKeys =
   | 'botLambdaLayerName'
   | 'bcryptHashSalt'
   | 'bullmq'
+  | 'dataWarehouse'
   | 'shutdownTimeoutMilliseconds'
   | 'accurateCountThreshold'
   | 'maxSearchOffset'
+  | 'base64BinaryMaxBytes'
+  | 'inlineAttachmentsMaxTotalBytes'
   | 'defaultBotRuntimeVersion'
   | 'defaultProjectFeatures'
   | 'defaultProjectSystemSetting'
   | 'emailProvider'
+  | 'rateLimitsEnabled'
   | 'defaultRateLimit'
   | 'defaultAuthRateLimit'
-  | 'defaultFhirQuota';
+  | 'defaultFhirQuota'
+  | 'aiRealtimeTranscriptionUrl'
+  | 'asyncDelayScaling';
 
 const integerKeys = new Set([
   'accurateCountThreshold',
   'bcryptHashSalt',
+  'base64BinaryMaxBytes',
   'defaultAuthRateLimit',
   'defaultFhirQuota',
   'defaultRateLimit',
@@ -112,11 +124,13 @@ const integerKeys = new Set([
   'maxBotLogLengthForLogs',
   'maxBotLogLengthForResource',
   'maxSearchOffset',
+  'inlineAttachmentsMaxTotalBytes',
   'mfaAuthenticatorWindow',
   'port',
   'shutdownTimeoutMilliseconds',
   'transactionAttempts',
   'transactionExpBackoffBaseDelayMs',
+  'idleInTransactionLogThresholdMs',
   'fhirSearchMinLimit',
 
   'database.maxConnections',
@@ -128,6 +142,14 @@ const integerKeys = new Set([
 
   'redis.db',
   'redis.port',
+  'cacheRedis.db',
+  'cacheRedis.port',
+  'rateLimitRedis.db',
+  'rateLimitRedis.port',
+  'pubSubRedis.db',
+  'pubSubRedis.port',
+  'backgroundJobsRedis.db',
+  'backgroundJobsRedis.port',
 
   'smtp.port',
 
@@ -145,6 +167,8 @@ export function isFloatConfig(_key: string): boolean {
 }
 
 const booleanKeys = new Set([
+  'allowInsecureExternalAuthUrl',
+  'allowInsecureRestHookUrl',
   'botCustomFunctionsEnabled',
   'database.ssl.rejectUnauthorized',
   'database.ssl.require',
@@ -154,6 +178,7 @@ const booleanKeys = new Set([
   'readonlyDatabase.ssl.rejectUnauthorized',
   'readonlyDatabase.ssl.require',
   'readonlyDatabase.disableConnectionConfiguration',
+  'rateLimitsEnabled',
   'logRequests',
   'logAuditEvents',
   'mcpEnabled',
@@ -162,6 +187,7 @@ const booleanKeys = new Set([
   'rejectUnauthorized',
   'fhirSearchDiscourageSeqScan',
   'redactAuditEvents',
+  'dataWarehouse.enabled',
 ]);
 
 export function isBooleanConfig(key: string): boolean {
@@ -171,14 +197,27 @@ export function isBooleanConfig(key: string): boolean {
 const objectKeys = new Set([
   'tls',
   'ssl',
+  'defaultProjectFeatures',
   'defaultProjectSystemSetting',
   'defaultOAuthClients',
+  'externalAuthProviders',
   'smtp',
   'arrayColumnPadding',
+  'subscriptionAutoDisable',
+  'workers',
+  'workers.enabled',
+  'workers.bullmq',
+  'dataWarehouse',
 ]);
 
 export function isObjectConfig(key: string): boolean {
   return objectKeys.has(key);
+}
+
+const arrayKeys = new Set(['dataWarehouse.includeResourceTypes', 'dataWarehouse.excludeResourceTypes']);
+
+export function isArrayConfig(key: string): boolean {
+  return arrayKeys.has(key);
 }
 
 export function setValue(config: Record<string, unknown>, key: string, value: string): void {
@@ -200,6 +239,8 @@ export function setValue(config: Record<string, unknown>, key: string, value: st
     parsedValue = value === 'true';
   } else if (isObjectConfig(key)) {
     parsedValue = JSON.parse(value);
+  } else if (isArrayConfig(key)) {
+    parsedValue = value.split(',').map((v) => v.trim());
   }
 
   obj[keySegments[0]] = parsedValue;

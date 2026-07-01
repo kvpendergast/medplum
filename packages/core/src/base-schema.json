@@ -4262,6 +4262,20 @@
           }
         ]
       },
+      "userInfoMode": {
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      "userInfoApiKey": {
+        "type": [
+          {
+            "code": "string"
+          }
+        ]
+      },
       "clientId": {
         "min": 1,
         "type": [
@@ -4289,6 +4303,20 @@
         "type": [
           {
             "code": "boolean"
+          }
+        ]
+      },
+      "identitySource": {
+        "type": [
+          {
+            "code": "code"
+          }
+        ]
+      },
+      "identityMappingMode": {
+        "type": [
+          {
+            "code": "code"
           }
         ]
       }

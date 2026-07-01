@@ -50,10 +50,24 @@ describe('CodeSystem validate-code', () => {
         resourceType: 'Parameters',
         parameter: [
           { name: 'system', valueUri: codeSystem.url },
-          { name: 'concept', valueCoding: { code: '1', display: 'Biopsy of brain' } },
+          {
+            name: 'concept',
+            valueCoding: {
+              code: '1',
+              display: 'Biopsy of brain',
+            },
+          },
+          {
+            name: 'designation',
+            part: [
+              { name: 'code', valueCode: '1' },
+              { name: 'language', valueCode: 'fr' },
+              { name: 'value', valueString: 'biopsie du tissu encéphalique' },
+            ],
+          },
           { name: 'concept', valueCoding: { code: '2', display: 'Biopsy of head' } },
         ],
-      } as Parameters);
+      });
     expect(res2.status).toBe(200);
   });
 
@@ -72,7 +86,7 @@ describe('CodeSystem validate-code', () => {
           { name: 'url', valueUri: codeSystem.url },
           { name: 'code', valueCode: '1' },
         ],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -91,7 +105,7 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: codeSystem.url, code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -113,7 +127,7 @@ describe('CodeSystem validate-code', () => {
           { name: 'url', valueUri: codeSystem.url },
           { name: 'code', valueCode: 'wrong code' },
         ],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -129,7 +143,7 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'code', valueCode: 'wrong code' }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(400);
     expect(res.body).toMatchObject<OperationOutcome>({
       resourceType: 'OperationOutcome',
@@ -146,7 +160,7 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: codeSystem.url, code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toBe(404);
   });
 
@@ -161,7 +175,7 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system, code: '1' } }],
-      } as Parameters);
+      });
     expect(resY.status).toBe(200);
     expect(resY.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -179,7 +193,7 @@ describe('CodeSystem validate-code', () => {
           { name: 'url', valueUri: 'http://example.com/other-system' },
           { name: 'coding', valueCoding: { system, code: '1' } },
         ],
-      } as Parameters);
+      });
     expect(resN.status).toBe(200);
     expect(resN.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -212,7 +226,7 @@ describe('CodeSystem validate-code', () => {
           { name: 'coding', valueCoding: { system: codeSystem.url, code: '5' } },
           { name: 'version', valueString: '3.1.4' },
         ],
-      } as Parameters);
+      });
     expect(res2.status).toStrictEqual(200);
     expect(res2.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -276,7 +290,7 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
@@ -295,11 +309,33 @@ describe('CodeSystem validate-code', () => {
       .send({
         resourceType: 'Parameters',
         parameter: [{ name: 'coding', valueCoding: { system: 'incorrect', code: '1' } }],
-      } as Parameters);
+      });
     expect(res.status).toStrictEqual(200);
     expect(res.body).toMatchObject<Parameters>({
       resourceType: 'Parameters',
       parameter: [{ name: 'result', valueBoolean: false }],
+    });
+  });
+
+  test('Returns specified displayLanguage', async () => {
+    const res = await request(app)
+      .post(`/fhir/R4/CodeSystem/${codeSystem.id}/$validate-code`)
+      .set('Authorization', 'Bearer ' + accessToken)
+      .set('Content-Type', 'application/fhir+json')
+      .send({
+        resourceType: 'Parameters',
+        parameter: [
+          { name: 'coding', valueCoding: { system: codeSystem.url, code: '1' } },
+          { name: 'displayLanguage', valueCode: 'fr' },
+        ],
+      });
+    expect(res.status).toStrictEqual(200);
+    expect(res.body).toMatchObject<Parameters>({
+      resourceType: 'Parameters',
+      parameter: [
+        { name: 'result', valueBoolean: true },
+        { name: 'display', valueString: 'biopsie du tissu encéphalique' },
+      ],
     });
   });
 

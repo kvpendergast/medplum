@@ -1,7 +1,8 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 export * from './access';
-export type * from './agent';
+export * from './agent';
+export * from './array';
 export * from './base-schema-utils';
 export * from './base64';
 export * from './bundle';
@@ -25,6 +26,7 @@ export * from './fhirmapper/parse';
 export * from './fhirmapper/transform';
 export * from './fhirpath/atoms';
 export * from './fhirpath/parse';
+export * from './fhirpath/patch';
 export * from './fhirpath/utils';
 export * from './filebuilder';
 export * from './filter/parse';
@@ -34,7 +36,10 @@ export * from './hl7';
 export * from './jwt';
 export * from './keyvalue';
 export * from './logger';
+export * from './medication-order-utils';
 export * from './outcomes';
+export * from './patch';
+export * from './pharmacy-utils';
 export * from './readablepromise';
 export * from './schema';
 export * from './search/derived';
@@ -43,6 +48,7 @@ export * from './search/ir';
 export * from './search/match';
 export * from './search/search';
 export * from './sftp';
+export * from './smarthealthlinks';
 export * from './sql-on-fhir/eval';
 export * from './storage';
 export * from './subscriptions';

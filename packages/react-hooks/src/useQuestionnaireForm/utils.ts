@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { TypedValue } from '@medplum/core';
 import {
+  EMPTY,
   HTTP_HL7_ORG,
   PropertyType,
+  append,
   capitalize,
   deepClone,
   evalFhirPathTyped,
@@ -59,6 +61,7 @@ export const QUESTIONNAIRE_ENABLED_WHEN_EXPRESSION_URL = `${HTTP_HL7_ORG}/fhir/u
 export const QUESTIONNAIRE_CALCULATED_EXPRESSION_URL = `${HTTP_HL7_ORG}/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-calculatedExpression`;
 export const QUESTIONNAIRE_SIGNATURE_REQUIRED_URL = `${HTTP_HL7_ORG}/fhir/StructureDefinition/questionnaire-signatureRequired`;
 export const QUESTIONNAIRE_SIGNATURE_RESPONSE_URL = `${HTTP_HL7_ORG}/fhir/StructureDefinition/questionnaireresponse-signature`;
+export const QUESTIONNAIRE_HIDDEN_URL = `${HTTP_HL7_ORG}/fhir/StructureDefinition/questionnaire-hidden`;
 
 /**
  * Returns true if the item is a choice question.
@@ -67,6 +70,56 @@ export const QUESTIONNAIRE_SIGNATURE_RESPONSE_URL = `${HTTP_HL7_ORG}/fhir/Struct
  */
 export function isChoiceQuestion(item: QuestionnaireItem): boolean {
   return item.type === 'choice' || item.type === 'open-choice';
+}
+
+/**
+ * Returns a copy of the questionnaire response with response items for disabled
+ * questionnaire items removed.
+ *
+ * Per the FHIR R4 spec, a QuestionnaireResponse should not include answers for items
+ * whose `enableWhen` evaluates to false or whose `questionnaire-hidden` extension is
+ * true. The form preserves answers in local state so that re-enabling an item
+ * restores its previous value, so callers must strip disabled items before
+ * persisting or transmitting the response.
+ *
+ * @param questionnaire - The questionnaire defining the items.
+ * @param response - The current questionnaire response.
+ * @returns A new questionnaire response with disabled items removed.
+ */
+export function removeDisabledItems(
+  questionnaire: Questionnaire,
+  response: QuestionnaireResponse
+): QuestionnaireResponse {
+  return {
+    ...response,
+    item: filterEnabledResponseItems(questionnaire.item, response.item, response),
+  };
+}
+
+function filterEnabledResponseItems(
+  items: QuestionnaireItem[] | undefined,
+  responseItems: QuestionnaireResponseItem[] | undefined,
+  response: QuestionnaireResponse
+): QuestionnaireResponseItem[] | undefined {
+  if (!responseItems) {
+    return responseItems;
+  }
+  const result: QuestionnaireResponseItem[] = [];
+  for (const responseItem of responseItems) {
+    const item = items?.find((i) => i.linkId === responseItem.linkId);
+    if (item && !isQuestionEnabled(item, response)) {
+      continue;
+    }
+    if (item?.item && responseItem.item) {
+      result.push({
+        ...responseItem,
+        item: filterEnabledResponseItems(item.item, responseItem.item, response),
+      });
+    } else {
+      result.push(responseItem);
+    }
+  }
+  return result;
 }
 
 /**
@@ -79,6 +132,12 @@ export function isQuestionEnabled(
   item: QuestionnaireItem,
   questionnaireResponse: QuestionnaireResponse | undefined
 ): boolean {
+  // Check for questionnaire-hidden extension first - if present and true, the item is permanently hidden
+  const hiddenExtension = getExtension(item, QUESTIONNAIRE_HIDDEN_URL);
+  if (hiddenExtension?.valueBoolean === true) {
+    return false;
+  }
+
   const extensionResult = isQuestionEnabledViaExtension(item, questionnaireResponse);
   if (extensionResult !== undefined) {
     return extensionResult;
@@ -136,7 +195,7 @@ function isQuestionEnabledViaEnabledWhen(
 
   const enableBehavior = item.enableBehavior ?? 'any';
   for (const enableWhen of item.enableWhen) {
-    const actualAnswers = getByLinkId(questionnaireResponse?.item, enableWhen.question as string);
+    const actualAnswers = getByLinkId(questionnaireResponse?.item, enableWhen.question);
 
     if (enableWhen.operator === 'exists' && !enableWhen.answerBoolean && !actualAnswers?.length) {
       if (enableBehavior === 'any') {
@@ -295,11 +354,7 @@ function getByLinkId(
   responseItems: QuestionnaireResponseItem[] | undefined,
   linkId: string
 ): QuestionnaireResponseItemAnswer[] | undefined {
-  if (!responseItems) {
-    return undefined;
-  }
-
-  for (const response of responseItems) {
+  for (const response of responseItems ?? EMPTY) {
     if (response.linkId === linkId) {
       return response.answer;
     }
@@ -310,7 +365,6 @@ function getByLinkId(
       }
     }
   }
-
   return undefined;
 }
 
@@ -463,30 +517,26 @@ function buildInitialResponseItems(
   items: QuestionnaireItem[] | undefined,
   responseItems: QuestionnaireResponseItem[] | undefined
 ): QuestionnaireResponseItem[] | undefined {
-  if (!items) {
-    return undefined;
-  }
-
-  const result = [];
-  for (const item of items) {
+  let result: QuestionnaireResponseItem[] | undefined;
+  for (const item of items ?? EMPTY) {
     if (item.type === QuestionnaireItemType.display) {
       // Display items do not have response items, so we skip them.
       continue;
     }
 
     const existingResponseItems = responseItems?.filter((responseItem) => responseItem.linkId === item.linkId);
-    if (existingResponseItems && existingResponseItems?.length > 0) {
+    if (existingResponseItems?.length) {
       for (const existingResponseItem of existingResponseItems) {
         // Update existing response item
         existingResponseItem.id = existingResponseItem.id ?? generateId();
         existingResponseItem.text = existingResponseItem.text ?? item.text;
         existingResponseItem.item = buildInitialResponseItems(item.item, existingResponseItem.item);
         existingResponseItem.answer = buildInitialResponseAnswer(item, existingResponseItem);
-        result.push(existingResponseItem);
+        result = append(result, existingResponseItem);
       }
     } else {
       // Add new response item
-      result.push(buildInitialResponseItem(item));
+      result = append(result, buildInitialResponseItem(item));
     }
   }
 

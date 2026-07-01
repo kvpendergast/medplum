@@ -1,9 +1,10 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { DiagnosticReport, Observation } from '@medplum/fhirtypes';
+import { EMPTY } from '@medplum/core';
+import type { DiagnosticReport } from '@medplum/fhirtypes';
 import { OID_RESULT_ORGANIZER } from '../../oids';
 import { mapCodeableConceptToCcdaCode } from '../../systems';
-import type { CcdaCode, CcdaEntry, CcdaId, CcdaOrganizerComponent } from '../../types';
+import type { CcdaEntry, CcdaId, CcdaOrganizerComponent } from '../../types';
 import type { FhirToCcdaConverter } from '../convert';
 import { mapIdentifiers } from '../utils';
 import { createCcdaObservation } from './observation';
@@ -11,17 +12,15 @@ import { createCcdaObservation } from './observation';
 export function createDiagnosticReportEntry(converter: FhirToCcdaConverter, resource: DiagnosticReport): CcdaEntry {
   const components: CcdaOrganizerComponent[] = [];
 
-  if (resource.result) {
-    for (const member of resource.result) {
-      const child = converter.findResourceByReference(member);
-      if (child?.resourceType !== 'Observation') {
-        continue;
-      }
-
-      components.push({
-        observation: [createCcdaObservation(converter, child as Observation)],
-      });
+  for (const member of resource.result ?? EMPTY) {
+    const child = converter.findResourceByReference(member);
+    if (child?.resourceType !== 'Observation') {
+      continue;
     }
+
+    components.push({
+      observation: [createCcdaObservation(converter, child)],
+    });
   }
 
   // Note: The effectiveTime is an interval that spans the effectiveTimes of the contained result observations.
@@ -38,7 +37,7 @@ export function createDiagnosticReportEntry(converter: FhirToCcdaConverter, reso
           { '@_root': OID_RESULT_ORGANIZER, '@_extension': '2015-08-01' },
         ],
         id: mapIdentifiers(resource.id, resource.identifier) as CcdaId[],
-        code: mapCodeableConceptToCcdaCode(resource.code) as CcdaCode,
+        code: mapCodeableConceptToCcdaCode(resource.code),
         statusCode: { '@_code': 'completed' },
         component: components,
       },

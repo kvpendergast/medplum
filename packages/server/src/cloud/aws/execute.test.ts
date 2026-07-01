@@ -1,13 +1,14 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { InvokeCommand, LambdaClient, ListLayerVersionsCommand } from '@aws-sdk/client-lambda';
-import { ContentType } from '@medplum/core';
+import { badRequest, ContentType } from '@medplum/core';
 import type { Bot } from '@medplum/fhirtypes';
 import type { AwsClientStub } from 'aws-sdk-client-mock';
 import { mockClient } from 'aws-sdk-client-mock';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import request from 'supertest';
+import { vi } from 'vitest';
 import { initApp, shutdownApp } from '../../app';
 import { getConfig, loadTestConfig } from '../../config/loader';
 import { getBinaryStorage } from '../../storage/loader';
@@ -99,7 +100,7 @@ describe('Execute', () => {
         name: [{ given: ['John'], family: ['Doe'] }],
       });
     expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toBe('application/json; charset=utf-8');
+    expect(res.headers['content-type']).toBe('application/fhir+json; charset=utf-8');
   });
 
   test('Submit FHIR without content type', async () => {
@@ -111,12 +112,12 @@ describe('Execute', () => {
         name: [{ given: ['John'], family: ['Doe'] }],
       });
     expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toBe('application/json; charset=utf-8');
+    expect(res.headers['content-type']).toBe('application/fhir+json; charset=utf-8');
   });
 
   test('Submit HL7', async () => {
     const binaryStorage = getBinaryStorage();
-    const writeFileSpy = jest.spyOn(binaryStorage, 'writeFile');
+    const writeFileSpy = vi.spyOn(binaryStorage, 'writeFile');
 
     const text =
       'MSH|^~\\&|Main_HIS|XYZ_HOSPITAL|iFW|ABC_Lab|20160915003015||ACK|9B38584D|P|2.6.1|\r' +
@@ -230,5 +231,21 @@ describe('Execute', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toBe('text/plain; charset=utf-8');
     expect(res.text).toStrictEqual('input');
+  });
+
+  test('Returned non-OK OperationOutcome marks execution as failure', async () => {
+    const outcome = badRequest('Returned problem');
+    mockLambdaClient.on(InvokeCommand).callsFake(() => ({
+      LogResult: Buffer.from('END RequestId: 123').toString('base64'),
+      Payload: new TextEncoder().encode(JSON.stringify(outcome)),
+    }));
+
+    const res = await request(app)
+      .post(`/fhir/R4/Bot/${bot.id}/$execute`)
+      .set('Content-Type', ContentType.FHIR_JSON)
+      .set('Authorization', 'Bearer ' + accessToken)
+      .send({});
+    expect(res.status).toBe(400);
+    expect(res.body).toMatchObject(outcome);
   });
 });

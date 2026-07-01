@@ -37,6 +37,7 @@ import type {
   Subscription,
   UserConfiguration,
 } from '@medplum/fhirtypes';
+import { MOCK_ALICE_PRACTITIONER_ID } from './constants';
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 /** @ts-ignore */
 import type { CustomTableLayout, TDocumentDefinitions, TFontDictionary } from 'pdfmake/interfaces';
@@ -180,6 +181,10 @@ export class MockClient extends MedplumClient {
   clear(): void {
     super.clear();
     this.activeLoginOverride = undefined;
+  }
+
+  withSeeding<T>(fn: () => T | Promise<T>): Promise<T> {
+    return this.repo.withSeeding(fn);
   }
 
   getProfile(): ProfileResource | undefined {
@@ -582,6 +587,8 @@ export class MockFetchClient {
     if (path.startsWith('auth/mfa/status')) {
       return {
         enrolled: false,
+        enrolledMethods: [],
+        allowedMethods: ['totp'],
         enrollUri: 'otpauth://totp/medplum.com:alice.smith%40example',
       };
     }
@@ -722,7 +729,7 @@ export class MockFetchClient {
           login_id: '123',
         }),
         refresh_token: createFakeJwt({ client_id: 123 }),
-        profile: { reference: 'Practitioner/123' },
+        profile: { reference: `Practitioner/${MOCK_ALICE_PRACTITIONER_ID}` },
       };
     }
 
@@ -730,56 +737,69 @@ export class MockFetchClient {
   }
 
   private async initMockRepo(): Promise<void> {
-    const defaultResources = [
-      HomerSimpsonPreviousVersion,
-      HomerSimpson,
-      ExampleAccessPolicy,
-      ExampleStatusValueSet,
-      ExampleUserConfiguration,
-      ExampleBot,
-      ExampleClient,
-      HomerDiagnosticReport,
-      HomerEncounter,
-      HomerCommunication,
-      HomerMedia,
-      HomerObservation1,
-      HomerObservation2,
-      HomerObservation3,
-      HomerObservation4,
-      HomerObservation5,
-      HomerObservation6,
-      HomerObservation7,
-      HomerObservation8,
-      HomerSimpsonSpecimen,
-      TestOrganization,
-      DifferentOrganization,
-      ExampleQuestionnaire,
-      ExampleQuestionnaireResponse,
-      HomerServiceRequest,
-      ExampleSubscription,
-      BartSimpson,
-      DrAliceSmithPreviousVersion,
-      DrAliceSmith,
-      DrAliceSmithSchedule,
-      ExampleWorkflowQuestionnaire1,
-      ExampleWorkflowQuestionnaire2,
-      ExampleWorkflowQuestionnaire3,
-      ExampleWorkflowPlanDefinition,
-      ExampleWorkflowQuestionnaireResponse1,
-      ExampleWorkflowTask1,
-      ExampleWorkflowTask2,
-      ExampleWorkflowTask3,
-      ExampleWorkflowRequestGroup,
-      ExampleSmartClientApplication,
-      TestProject,
-      TestProjectMembership,
-      ExampleThreadHeader,
-      ...ExampleThreadMessages,
-    ] satisfies Resource[];
+    await this.repo.withSeeding(async () => {
+      const defaultResources = [
+        HomerSimpsonPreviousVersion,
+        ExampleAccessPolicy,
+        ExampleStatusValueSet,
+        ExampleUserConfiguration,
+        ExampleBot,
+        ExampleClient,
+        HomerDiagnosticReport,
+        HomerEncounter,
+        HomerCommunication,
+        HomerMedia,
+        HomerObservation1,
+        HomerObservation2,
+        HomerObservation3,
+        HomerObservation4,
+        HomerObservation5,
+        HomerObservation6,
+        HomerObservation7,
+        HomerObservation8,
+        HomerSimpsonSpecimen,
+        TestOrganization,
+        DifferentOrganization,
+        ExampleQuestionnaire,
+        ExampleQuestionnaireResponse,
+        HomerServiceRequest,
+        ExampleSubscription,
+        BartSimpson,
+        DrAliceSmithPreviousVersion,
+        DrAliceSmithSchedule,
+        ExampleWorkflowQuestionnaire1,
+        ExampleWorkflowQuestionnaire2,
+        ExampleWorkflowQuestionnaire3,
+        ExampleWorkflowPlanDefinition,
+        ExampleWorkflowQuestionnaireResponse1,
+        ExampleWorkflowTask1,
+        ExampleWorkflowTask2,
+        ExampleWorkflowTask3,
+        ExampleWorkflowRequestGroup,
+        ExampleSmartClientApplication,
+        TestProject,
+        TestProjectMembership,
+        ExampleThreadHeader,
+        ...ExampleThreadMessages,
+      ] satisfies Resource[];
 
-    for (const resource of defaultResources) {
-      await this.repo.createResource(resource);
-    }
+      for (const resource of defaultResources) {
+        try {
+          await this.repo.createResource(resource);
+        } catch (err) {
+          console.log({ err, resource });
+          throw err;
+        }
+      }
+
+      // apply updates to existing resources (found in the `defaultResources`
+      // list as "*PreviousVersion")
+      const updateResources = [HomerSimpson, DrAliceSmith] satisfies Resource[];
+
+      for (const resource of updateResources) {
+        await this.repo.updateResource(resource);
+      }
+    });
 
     for (const structureDefinition of StructureDefinitionList as StructureDefinition[]) {
       structureDefinition.kind = 'resource';

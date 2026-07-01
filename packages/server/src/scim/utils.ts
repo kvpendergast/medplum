@@ -1,12 +1,11 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { SearchRequest, WithId } from '@medplum/core';
+import type { Operation, SearchRequest, WithId } from '@medplum/core';
 import { badRequest, forbidden, getReferenceString, OperationOutcomeError, Operator } from '@medplum/core';
-import type { AccessPolicy, Project, ProjectMembership, Reference, User } from '@medplum/fhirtypes';
-import type { Operation } from 'rfc6902';
+import type { Project, ProjectMembership, Reference, User } from '@medplum/fhirtypes';
 import { inviteUser } from '../admin/invite';
 import { getConfig } from '../config/loader';
-import { getSystemRepo } from '../fhir/repo';
+import type { SystemRepository } from '../fhir/repo';
 import { patchObject } from '../util/patch';
 import type { ScimListResponse, ScimPatchRequest, ScimUser } from './types';
 
@@ -15,11 +14,13 @@ import type { ScimListResponse, ScimPatchRequest, ScimUser } from './types';
  *
  * See SCIM 3.4.2 - Query Resources
  * https://www.rfc-editor.org/rfc/rfc7644#section-3.4.2
+ * @param systemRepo - The system repository.
  * @param project - The project.
  * @param params - The search parameters.
  * @returns List of SCIM users in the project.
  */
 export async function searchScimUsers(
+  systemRepo: SystemRepository,
   project: WithId<Project>,
   params: Record<string, string>
 ): Promise<ScimListResponse<ScimUser>> {
@@ -42,7 +43,7 @@ export async function searchScimUsers(
 
   const filter = params.filter;
   if (filter && typeof filter === 'string') {
-    const match = filter.match(/^userName eq "([^"]+)"$/);
+    const match = /^userName eq "([^"]+)"$/.exec(filter);
     if (match) {
       searchRequest.filters.push({
         code: 'user-name',
@@ -52,7 +53,6 @@ export async function searchScimUsers(
     }
   }
 
-  const systemRepo = getSystemRepo();
   const memberships = await systemRepo.searchResources<ProjectMembership>(searchRequest);
 
   const users = await systemRepo.readReferences(memberships.map((m) => m.user as Reference<User>));
@@ -82,12 +82,11 @@ export async function createScimUser(
 ): Promise<ScimUser> {
   const resourceType = getScimUserResourceType(scimUser);
 
-  let accessPolicy: Reference<AccessPolicy> | undefined = undefined;
-  if (resourceType === 'Patient') {
-    accessPolicy = project.defaultPatientAccessPolicy;
-    if (!accessPolicy) {
-      throw new OperationOutcomeError(badRequest('Missing defaultPatientAccessPolicy'));
-    }
+  // SCIM Patient provisioning requires a configured default policy. inviteUser applies
+  // defaultPatientAccessPolicy for Patients automatically, but admin invite allows
+  // creating Patients without one.
+  if (resourceType === 'Patient' && !project.defaultPatientAccessPolicy) {
+    throw new OperationOutcomeError(badRequest('Missing defaultPatientAccessPolicy'));
   }
 
   const { user, membership } = await inviteUser({
@@ -99,7 +98,6 @@ export async function createScimUser(
     externalId: scimUser.externalId,
     sendEmail: false,
     membership: {
-      accessPolicy,
       invitedBy,
       userName: scimUser.userName,
     },
@@ -113,12 +111,12 @@ export async function createScimUser(
  *
  * See SCIM 3.4.1 - Retrieve a Known Resource
  * https://www.rfc-editor.org/rfc/rfc7644#section-3.4.1
+ * @param systemRepo - The system repository.
  * @param project - The project.
  * @param id - The user ID.
  * @returns The user.
  */
-export async function readScimUser(project: Project, id: string): Promise<ScimUser> {
-  const systemRepo = getSystemRepo();
+export async function readScimUser(systemRepo: SystemRepository, project: Project, id: string): Promise<ScimUser> {
   const membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', id);
   if (membership.project?.reference !== getReferenceString(project)) {
     throw new OperationOutcomeError(forbidden);
@@ -133,12 +131,16 @@ export async function readScimUser(project: Project, id: string): Promise<ScimUs
  *
  * See SCIM 3.5.1 - Replace a Resource
  * https://www.rfc-editor.org/rfc/rfc7644#section-3.5.1
+ * @param systemRepo - The system repository.
  * @param project - The project.
  * @param scimUser - The updated user definition.
  * @returns The updated user.
  */
-export async function updateScimUser(project: Project, scimUser: ScimUser): Promise<ScimUser> {
-  const systemRepo = getSystemRepo();
+export async function updateScimUser(
+  systemRepo: SystemRepository,
+  project: Project,
+  scimUser: ScimUser
+): Promise<ScimUser> {
   let membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', scimUser.id as string);
   if (membership.project?.reference !== getReferenceString(project)) {
     throw new OperationOutcomeError(forbidden);
@@ -162,13 +164,18 @@ export async function updateScimUser(project: Project, scimUser: ScimUser): Prom
  * See SCIM 3.5.2 - Modifying with PATCH
  * https://www.rfc-editor.org/rfc/rfc7644#section-3.5.2
  *
+ * @param systemRepo - The system repository.
  * @param project - The project.
  * @param id - The user ID.
  * @param request - The patch request.
  * @returns The updated user.
  */
-export async function patchScimUser(project: Project, id: string, request: ScimPatchRequest): Promise<ScimUser> {
-  const systemRepo = getSystemRepo();
+export async function patchScimUser(
+  systemRepo: SystemRepository,
+  project: Project,
+  id: string,
+  request: ScimPatchRequest
+): Promise<ScimUser> {
   let membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', id);
   if (membership.project?.reference !== getReferenceString(project)) {
     throw new OperationOutcomeError(forbidden);
@@ -197,12 +204,12 @@ export async function patchScimUser(project: Project, id: string, request: ScimP
  *
  * See SCIM 3.4.1 - Retrieve a Known Resource
  * https://www.rfc-editor.org/rfc/rfc7644#section-3.4.1
+ * @param systemRepo - The system repository.
  * @param project - The project.
  * @param id - The user ID.
  * @returns The user.
  */
-export async function deleteScimUser(project: Project, id: string): Promise<void> {
-  const systemRepo = getSystemRepo();
+export async function deleteScimUser(systemRepo: SystemRepository, project: Project, id: string): Promise<void> {
   const membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', id);
   if (membership.project?.reference !== getReferenceString(project)) {
     throw new OperationOutcomeError(forbidden);

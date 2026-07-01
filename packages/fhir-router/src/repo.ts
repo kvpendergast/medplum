@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { SearchRequest, SortRule, WithId } from '@medplum/core';
+import type { Operation, SearchRequest, SortRule, WithId } from '@medplum/core';
 import {
+  EMPTY,
   OperationOutcomeError,
   Operator,
   allOk,
+  applyPatch,
   badRequest,
   created,
   deepClone,
@@ -18,9 +20,7 @@ import {
   preconditionFailed,
   stringify,
 } from '@medplum/core';
-import type { Bundle, OperationOutcome, Reference, Resource } from '@medplum/fhirtypes';
-import type { Operation } from 'rfc6902';
-import { applyPatch } from 'rfc6902';
+import type { Bundle, OperationOutcome, Parameters, Reference, Resource } from '@medplum/fhirtypes';
 
 export type CreateResourceOptions = {
   assignedId?: boolean;
@@ -51,7 +51,7 @@ export type RepositoryMode = (typeof RepositoryMode)[keyof typeof RepositoryMode
  * Additionally, several convenience method implementations are provided to offer advanced functionality on top of the
  * abstract basic operations.
  */
-export abstract class FhirRepository<TClient = unknown> {
+export abstract class FhirRepository {
   /**
    * Sets the repository mode.
    * In general, it is assumed that repositories will start in "reader" mode,
@@ -163,7 +163,7 @@ export abstract class FhirRepository<TClient = unknown> {
   abstract patchResource<T extends Resource>(
     resourceType: T['resourceType'],
     id: string,
-    patch: Operation[]
+    patch: Operation[] | Parameters
   ): Promise<WithId<T>>;
 
   /**
@@ -175,6 +175,16 @@ export abstract class FhirRepository<TClient = unknown> {
    */
   abstract search<T extends Resource>(searchRequest: SearchRequest<T>): Promise<Bundle<WithId<T>>>;
 
+  /**
+   * Searches for FHIR resources by reference.
+   *
+   * This is an advanced operation that is primarily used to optimize GraphQL resolvers that need to search for resources by reference.
+   *
+   * @param searchRequest - The FHIR search request.
+   * @param referenceField - The name of the reference field to search by (e.g. "patient" or "subject").
+   * @param references - The reference values to search for (e.g. ["Patient/123", "Patient/456"]).
+   * @returns A record mapping reference values to the resources that reference them (e.g. \{ "Patient/123": [Observation1, Observation2], "Patient/456": [Observation3] \}).
+   */
   abstract searchByReference<T extends Resource>(
     searchRequest: SearchRequest<T>,
     referenceField: string,
@@ -187,7 +197,7 @@ export abstract class FhirRepository<TClient = unknown> {
    * @param callback - The callback function to be run within a transaction.
    */
   abstract withTransaction<TResult>(
-    callback: (client: TClient) => Promise<TResult>,
+    callback: (txRepo: this) => Promise<TResult>,
     options?: { serializable?: boolean }
   ): Promise<TResult>;
 
@@ -223,6 +233,22 @@ export abstract class FhirRepository<TClient = unknown> {
     return bundle.entry?.map((e) => e.resource as WithId<T>) ?? [];
   }
 
+  /**
+   * Conditionally creates a FHIR resource.
+   *
+   * The action it takes depends on how many matches are found:
+   *
+   *   1. No matches: The server processes the create as above
+   *   2. One Match: The server ignores the post and returns 200 OK
+   *   3. Multiple matches: The server returns a 412 Precondition Failed error indicating the client's criteria were not selective enough
+   *
+   * See: https://hl7.org/fhir/R4/http.html#ccreate
+   *
+   * @param resource - The FHIR resource to create.
+   * @param search - The "If-None-Exist" search criteria to determine if the resource already exists.
+   * @param options - Additional options for resource creation.
+   * @returns A promise resolving to the created resource and the operation outcome.
+   */
   async conditionalCreate<T extends Resource>(
     resource: T,
     search: SearchRequest<T>,
@@ -237,8 +263,8 @@ export abstract class FhirRepository<TClient = unknown> {
     search.sortRules = undefined;
 
     return this.withTransaction(
-      async () => {
-        const matches = await this.searchResources(search);
+      async (txRepo) => {
+        const matches = await txRepo.searchResources(search);
         if (matches.length === 1) {
           const existing = matches[0];
           if (!options?.assignedId && resource.id && resource.id !== existing.id) {
@@ -251,13 +277,31 @@ export abstract class FhirRepository<TClient = unknown> {
           throw new OperationOutcomeError(multipleMatches);
         }
 
-        const createdResource = await this.createResource(resource, options);
+        const createdResource = await txRepo.createResource(resource, options);
         return { resource: createdResource, outcome: created };
       },
       { serializable: true } // Requires strong transactional guarantees to ensure unique resource creation
     );
   }
 
+  /**
+   * Conditionally updates a FHIR resource.
+   *
+   * The action it takes depends on how many matches are found:
+   *
+   *   1. No matches, no id provided: The server creates the resource.
+   *   2. No matches, id provided: The server treats the interaction as an Update as Create interaction (or rejects it, if it does not support Update as Create)
+   *   3. One Match, no resource id provided OR (resource id provided and it matches the found resource): The server performs the update against the matching resource
+   *   4. One Match, resource id provided but does not match resource found: The server returns a 400 Bad Request error indicating the client id specification was a problem preferably with an OperationOutcome
+   *   5. Multiple matches: The server returns a 412 Precondition Failed error indicating the client's criteria were not selective enough preferably with an OperationOutcome
+   *
+   * See: https://hl7.org/fhir/R4/http.html#cond-update
+   *
+   * @param resource - The FHIR resource to update.
+   * @param search - The "If-Exist" search criteria to determine if the resource already exists.
+   * @param options - Additional options for resource update.
+   * @returns A promise resolving to the updated resource and the operation outcome.
+   */
   async conditionalUpdate<T extends Resource>(
     resource: T,
     search: SearchRequest,
@@ -272,15 +316,15 @@ export abstract class FhirRepository<TClient = unknown> {
     search.sortRules = undefined;
 
     return this.withTransaction(
-      async () => {
-        const matches = await this.searchResources(search);
+      async (txRepo) => {
+        const matches = await txRepo.searchResources(search);
         if (matches.length === 0) {
           if (resource.id && !options?.assignedId) {
             throw new OperationOutcomeError(
               badRequest('Cannot perform create as update with client-assigned ID', resource.resourceType + '.id')
             );
           }
-          const createdResource = await this.createResource(resource, options);
+          const createdResource = await txRepo.createResource(resource, options);
           return { resource: createdResource, outcome: created };
         } else if (matches.length > 1) {
           throw new OperationOutcomeError(multipleMatches);
@@ -293,21 +337,34 @@ export abstract class FhirRepository<TClient = unknown> {
           );
         }
 
-        const updated = await this.updateResource({ ...resource, id: existing.id }, options);
+        const updated = await txRepo.updateResource({ ...resource, id: existing.id }, options);
         return { resource: updated, outcome: allOk };
       },
       { serializable: true }
     );
   }
 
+  /**
+   * Conditionally deletes a FHIR resource.
+   *
+   * The action it takes depends on how many matches are found:
+   *
+   *   1. No matches or One Match: The server performs an ordinary delete on the matching resource
+   *   2. Multiple matches: A server may choose to delete all the matching resources, or it may choose to return a 412 Precondition Failed error indicating the client's criteria were not selective enough.
+   *
+   * See: https://hl7.org/fhir/R4/http.html#3.1.0.7.1
+   *
+   * @param search - The "If-Exist" search criteria to determine which resource(s) to delete.
+   * @returns A promise that resolves when the operation is complete.
+   */
   async conditionalDelete(search: SearchRequest): Promise<void> {
     // Limit search to optimize DB query
     search.count = 2;
     search.sortRules = undefined;
 
     await this.withTransaction(
-      async () => {
-        const matches = await this.searchResources(search);
+      async (txRepo) => {
+        const matches = await txRepo.searchResources(search);
         if (matches.length > 1) {
           throw new OperationOutcomeError(multipleMatches);
         } else if (!matches.length) {
@@ -315,7 +372,7 @@ export abstract class FhirRepository<TClient = unknown> {
         }
 
         const resource = matches[0];
-        await this.deleteResource(resource.resourceType, resource.id);
+        await txRepo.deleteResource(resource.resourceType, resource.id);
       },
       { serializable: true }
     );
@@ -327,8 +384,8 @@ export abstract class FhirRepository<TClient = unknown> {
     search.sortRules = undefined;
 
     return this.withTransaction(
-      async () => {
-        const matches = await this.searchResources(search);
+      async (txRepo) => {
+        const matches = await txRepo.searchResources(search);
         if (matches.length > 1) {
           throw new OperationOutcomeError(multipleMatches);
         } else if (!matches.length) {
@@ -336,21 +393,39 @@ export abstract class FhirRepository<TClient = unknown> {
         }
 
         const resource = matches[0];
-        return this.patchResource(resource.resourceType, resource.id, patch);
+        return txRepo.patchResource(resource.resourceType, resource.id, patch);
       },
       { serializable: true }
     );
   }
 }
 
-export class MemoryRepository extends FhirRepository<undefined> {
+export class MemoryRepository extends FhirRepository {
   private readonly resources: Map<string, Map<string, Resource>>;
   private readonly history: Map<string, Map<string, Resource[]>>;
+  private seeding: boolean;
 
   constructor() {
     super();
     this.resources = new Map();
     this.history = new Map();
+    this.seeding = false;
+  }
+
+  // Puts this repository into "seeding" mode, during which time
+  // you can specify meta information that normally would not be
+  // permissible.
+  async withSeeding<T>(fn: () => T | Promise<T>): Promise<T> {
+    if (this.seeding) {
+      // We're nested inside another seeding block, just run the callback
+      // without changing state
+      return fn();
+    }
+
+    this.seeding = true;
+    const result = await fn();
+    this.seeding = false;
+    return result;
   }
 
   clear(): void {
@@ -362,29 +437,43 @@ export class MemoryRepository extends FhirRepository<undefined> {
     // MockRepository ignores reader/writer mode
   }
 
-  async createResource<T extends Resource>(resource: T): Promise<WithId<T>> {
-    const result = JSON.parse(stringify(resource));
+  async createResource<T extends Resource>(
+    resource: T,
+    options?: CreateResourceOptions,
+    update: boolean = false
+  ): Promise<WithId<T>> {
+    //simulate round-tripping through a JSON serialized format
+    const parsed = JSON.parse(stringify(resource)) as T;
+    const result = {
+      ...parsed,
+      id: parsed.id ?? this.generateId(),
+      meta: parsed.meta ?? {},
+    };
 
-    if (!result.id) {
-      result.id = this.generateId();
-    }
-    if (!result.meta) {
-      result.meta = {};
-    }
-    if (!result.meta.versionId) {
-      result.meta.versionId = generateId();
-    }
-    if (!result.meta.lastUpdated) {
-      result.meta.lastUpdated = new Date().toISOString();
+    if (!this.seeding) {
+      if (result.meta.versionId) {
+        delete result.meta.versionId;
+      }
+      if (result.meta.lastUpdated) {
+        delete result.meta.lastUpdated;
+      }
     }
 
-    const { resourceType, id } = result as { resourceType: string; id: string };
+    result.meta.versionId ??= generateId();
+    result.meta.lastUpdated ??= new Date().toISOString();
+
+    const { resourceType, id } = result;
 
     let resources = this.resources.get(resourceType);
     if (!resources) {
       resources = new Map();
       this.resources.set(resourceType, resources);
     }
+
+    if (!update && resources.has(id)) {
+      throw new OperationOutcomeError(badRequest('Assigned ID is already in use'));
+    }
+
     resources.set(id, result);
 
     let resourceTypeHistory = this.history.get(resourceType);
@@ -423,35 +512,38 @@ export class MemoryRepository extends FhirRepository<undefined> {
       }
     }
 
-    const result = deepClone(resource);
-    if (result.meta) {
-      if (result.meta.versionId) {
-        delete result.meta.versionId;
-      }
-      if (result.meta.lastUpdated) {
-        delete result.meta.lastUpdated;
-      }
-    }
-    return this.createResource(result);
+    return this.createResource(resource, undefined, true);
   }
 
   async patchResource<T extends Resource>(
     resourceType: T['resourceType'],
     id: string,
-    patch: Operation[]
+    patch: Operation[] | Parameters
   ): Promise<WithId<T>> {
     const resource = await this.readResource<T>(resourceType, id);
 
     try {
-      const patchResult = applyPatch(resource, patch).filter(Boolean);
-      if (patchResult.length > 0) {
-        throw new OperationOutcomeError(badRequest(patchResult.map((e) => (e as Error).message).join('\n')));
+      if (Array.isArray(patch)) {
+        const patchResult = applyPatch(resource, patch).filter(Boolean);
+        if (patchResult.length > 0) {
+          throw new OperationOutcomeError(badRequest(patchResult.map((e) => (e as Error).message).join('\n')));
+        }
+      } else {
+        throw new Error('MemoryRepository does not support FHIRPath Patch');
       }
     } catch (err) {
       throw new OperationOutcomeError(normalizeOperationOutcome(err));
     }
 
-    return this.updateResource<T>(resource);
+    // ensure that even when in "seeding" mode calls to patchResource
+    // generate new version numbers and timestamps instead of recycling
+    // the previous version's
+    if (resource.meta) {
+      delete resource.meta.versionId;
+      delete resource.meta.lastUpdated;
+    }
+
+    return this.updateResource(resource);
   }
 
   async readResource<T extends Resource>(resourceType: string, id: string): Promise<T> {
@@ -510,10 +602,8 @@ export class MemoryRepository extends FhirRepository<undefined> {
       }
     }
     let entry = result.map((resource) => ({ resource: deepClone(resource) }));
-    if (searchRequest.sortRules) {
-      for (const sortRule of searchRequest.sortRules) {
-        entry = entry.sort((a, b) => sortComparator(a.resource as T, b.resource as T, sortRule));
-      }
+    for (const sortRule of searchRequest.sortRules ?? EMPTY) {
+      entry = entry.sort((a, b) => sortComparator(a.resource as T, b.resource as T, sortRule));
     }
     if (searchRequest.offset !== undefined) {
       entry = entry.slice(searchRequest.offset);
@@ -540,7 +630,7 @@ export class MemoryRepository extends FhirRepository<undefined> {
       searchRequest.filters.push({ code: referenceField, operator: Operator.EQUALS, value: reference });
       const bundle = await this.search(searchRequest);
       results[reference] = [];
-      for (const entry of bundle.entry ?? []) {
+      for (const entry of bundle.entry ?? EMPTY) {
         if (entry.resource) {
           results[reference].push(entry.resource);
         }
@@ -557,9 +647,9 @@ export class MemoryRepository extends FhirRepository<undefined> {
     this.resources.get(resourceType)?.delete(id);
   }
 
-  withTransaction<TResult>(callback: (client: undefined) => Promise<TResult>): Promise<TResult> {
+  withTransaction<TResult>(callback: (repo: this) => Promise<TResult>): Promise<TResult> {
     // MockRepository currently does not support transactions
-    return callback(undefined);
+    return callback(this);
   }
 }
 

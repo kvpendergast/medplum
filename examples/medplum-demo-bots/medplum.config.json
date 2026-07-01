@@ -1,6 +1,12 @@
 {
   "bots": [
     {
+      "name": "ai-realtime-questionnaire",
+      "id": "",
+      "source": "src/questionnaire-bots/ai-realtime/ai-realtime-questionnaire.ts",
+      "dist": "dist/questionnaire-bots/ai-realtime/ai-realtime-questionnaire.js"
+    },
+    {
       "name": "hello-patient",
       "id": "",
       "source": "src/hello-patient.ts",
@@ -119,6 +125,30 @@
       "id": "",
       "source": "src/twilio/voice-webhook.ts",
       "dist": "dist/twilio/voice-webhook.js"
+    },
+    {
+      "name": "ai-fhir-request-tools",
+      "id": "",
+      "source": "src/spaces-bots/fhir-translator-bot.ts",
+      "dist": "dist/spaces-bots/fhir-translator-bot.js"
+    },
+    {
+      "name": "ai-resource-summary-sse",
+      "id": "",
+      "source": "src/spaces-bots/fhir-summary-bot.ts",
+      "dist": "dist/spaces-bots/fhir-summary-bot.js"
+    },
+    {
+      "name": "ai-component-generator-sse",
+      "id": "",
+      "source": "src/spaces-bots/fhir-visualizer-bot.ts",
+      "dist": "dist/spaces-bots/fhir-visualizer-bot.js"
+    },
+    {
+      "name": "nppes-lookup",
+      "id": "",
+      "source": "src/nppes-lookup.ts",
+      "dist": "dist/nppes-lookup.js"
     }
   ]
 }

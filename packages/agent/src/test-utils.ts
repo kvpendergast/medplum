@@ -1,13 +1,22 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { ILogger } from '@medplum/core';
-import { LogLevel } from '@medplum/core';
+import type { ILogger, MedplumClient, WithId } from '@medplum/core';
+import { LogLevel, TypedEventTarget, sleep } from '@medplum/core';
+import type { Endpoint } from '@medplum/fhirtypes';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import type { Mock } from 'vitest';
+import type { ExtendedHl7ClientOptions } from './enhanced-hl7-client';
+import { EnhancedHl7Client } from './enhanced-hl7-client';
+import type { Hl7ClientPoolOptions } from './hl7-client-pool';
+import { Hl7ClientPool } from './hl7-client-pool';
+import { Hl7MessageTracker } from './hl7-message-tracker';
 import type { AgentLoggerConfig } from './logger';
 import { DEFAULT_LOGGER_CONFIG, LoggerType, WinstonWrapperLogger } from './logger';
+import type { HeartbeatEmitter } from './types';
 
 /**
  * Creates a Winston logger for testing purposes similar to how it's done in agent-main.ts
@@ -20,7 +29,7 @@ export function createTestWinstonLogger(
   loggerType: LoggerType = LoggerType.MAIN
 ): [WinstonWrapperLogger, () => void] {
   const uniqueId = randomUUID();
-  const testDir = path.join(os.tmpdir(), `jest-test-${uniqueId}`);
+  const testDir = path.join(os.tmpdir(), `vitest-test-${uniqueId}`);
   mkdirSync(testDir, { recursive: true });
 
   const config = {
@@ -36,17 +45,17 @@ export function createTestWinstonLogger(
   return [new WinstonWrapperLogger(config, loggerType), cleanup];
 }
 
-export function createMockLogger(logLevel: LogLevel = LogLevel.INFO): ILogger & { log: jest.Mock; clone: jest.Mock } {
+export function createMockLogger(logLevel: LogLevel = LogLevel.INFO): ILogger & { log: Mock; clone: Mock } {
   const logger: Record<string, any> = {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    log: jest.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    log: vi.fn(),
   };
   logger.level = logLevel;
-  logger.clone = jest.fn(() => logger);
-  return logger as ILogger & { log: jest.Mock; clone: jest.Mock };
+  logger.clone = vi.fn(() => logger);
+  return logger as ILogger & { log: Mock; clone: Mock };
 }
 
 /**
@@ -75,4 +84,83 @@ export function generateTestLogs(
 
     logMethod.call(logger, message, metadata);
   }
+}
+
+export function createTestEnhancedHl7Client(
+  options: Omit<ExtendedHl7ClientOptions, 'messageTracker' | 'heartbeatEmitter'> & {
+    messageTracker?: Hl7MessageTracker;
+    heartbeatEmitter?: HeartbeatEmitter;
+  }
+): { client: EnhancedHl7Client; messageTracker: Hl7MessageTracker; heartbeatEmitter: HeartbeatEmitter } {
+  const messageTracker = options.messageTracker ?? new Hl7MessageTracker();
+  const heartbeatEmitter = options.heartbeatEmitter ?? new TypedEventTarget();
+  const client = new EnhancedHl7Client({ ...options, messageTracker, heartbeatEmitter });
+  return { client, messageTracker, heartbeatEmitter };
+}
+
+export function createTestHl7ClientPool(
+  options: Omit<Hl7ClientPoolOptions, 'messageTracker' | 'heartbeatEmitter'> & {
+    messageTracker?: Hl7MessageTracker;
+    heartbeatEmitter?: HeartbeatEmitter;
+  }
+): { pool: Hl7ClientPool; messageTracker: Hl7MessageTracker; heartbeatEmitter: HeartbeatEmitter } {
+  const messageTracker = options.messageTracker ?? new Hl7MessageTracker();
+  const heartbeatEmitter = options.heartbeatEmitter ?? new TypedEventTarget();
+  const pool = new Hl7ClientPool({ ...options, messageTracker, heartbeatEmitter });
+  return { pool, messageTracker, heartbeatEmitter };
+}
+
+// Used only for tests that need a free port number with *nothing* listening on it.
+// For tests that start an Hl7Server, prefer `server.start(0)` which returns the OS-assigned
+// port and never has a release-then-rebind window.
+export async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.listen(0, () => {
+      const { port } = server.address() as { port: number };
+      server.close((err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(port);
+        }
+      });
+    });
+    server.on('error', reject);
+  });
+}
+
+export async function createEndpointWithRandomPort(
+  medplum: MedplumClient,
+  endpoint: Endpoint
+): Promise<[WithId<Endpoint>, number]> {
+  const port = await getFreePort();
+  const url = new URL(endpoint.address);
+  url.port = port.toString();
+  const createdEndpoint = await medplum.createResource({
+    ...endpoint,
+    address: url.toString(),
+  });
+  return [createdEndpoint, port];
+}
+
+/**
+ * Polls `predicate` until it returns `true` or `timeoutMs` elapses, then throws.
+ * The predicate may itself throw to fail fast (e.g. to surface an error observed
+ * while waiting); that error propagates out of `waitFor` unchanged.
+ * @param predicate - Condition to wait for.
+ * @param timeoutMs - Total time to wait before throwing (defaults to 1000ms).
+ * @param label - Optional description used in the timeout error message.
+ */
+export async function waitFor(predicate: () => boolean, timeoutMs = 1000, label?: string): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) {
+      return;
+    }
+    await sleep(10);
+  }
+  throw new Error(
+    label ? `waitFor: ${label} not satisfied after ${timeoutMs}ms` : `waitFor timed out after ${timeoutMs}ms`
+  );
 }

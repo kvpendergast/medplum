@@ -4,9 +4,9 @@ import { OAuthSigningAlgorithm, Operator } from '@medplum/core';
 import type { JsonWebKey } from '@medplum/fhirtypes';
 import type { JWK, JWSHeaderParameters, JWTPayload, JWTVerifyOptions, KeyLike } from 'jose';
 import { exportJWK, generateKeyPair, importJWK, jwtVerify, SignJWT } from 'jose';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import type { MedplumServerConfig } from '../config/types';
-import { getSystemRepo } from '../fhir/repo';
+import { getGlobalSystemRepo } from '../fhir/repo';
 import { globalLogger } from '../logger';
 
 export interface MedplumBaseClaims extends JWTPayload {
@@ -93,14 +93,17 @@ const DEFAULT_REFRESH_LIFETIME = '2w';
 
 let issuer: string | undefined;
 const publicKeys: Record<string, KeyLike> = {};
+const allSigningKeys: Record<string, KeyLike> = {};
 const jwks: { keys: JWK[] } = { keys: [] };
 let jsonWebKey: JsonWebKey | undefined;
-let signingKey: KeyLike | undefined;
+let jsonWebKeys: JsonWebKey[] = [];
+let defaultSigningKey: KeyLike | undefined;
 
 export async function initKeys(config: MedplumServerConfig): Promise<void> {
   issuer = undefined;
   jsonWebKey = undefined;
-  signingKey = undefined;
+  jsonWebKeys = [];
+  defaultSigningKey = undefined;
   jwks.keys = [];
 
   if (!config) {
@@ -112,13 +115,11 @@ export async function initKeys(config: MedplumServerConfig): Promise<void> {
     throw new Error('Missing issuer');
   }
 
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
   const searchResult = await systemRepo.searchResources<JsonWebKey>({
     resourceType: 'JsonWebKey',
     filters: [{ code: 'active', operator: Operator.EQUALS, value: 'true' }],
   });
-
-  let jsonWebKeys: JsonWebKey[] | undefined;
 
   if (searchResult.length > 0) {
     globalLogger.info(`Loaded ${searchResult.length} key(s) from the database`);
@@ -129,12 +130,12 @@ export async function initKeys(config: MedplumServerConfig): Promise<void> {
     globalLogger.info('No keys found.  Creating new key...');
     const keyResult = await generateKeyPair(PREFERRED_ALG);
     const jwk = await exportJWK(keyResult.privateKey);
-    const createResult = await systemRepo.createResource<JsonWebKey>({
+    const createResult = await systemRepo.createResource({
       resourceType: 'JsonWebKey',
       active: true,
       alg: PREFERRED_ALG,
       ...jwk,
-    } as JsonWebKey);
+    });
     jsonWebKeys = [createResult];
   }
 
@@ -151,7 +152,7 @@ export async function initKeys(config: MedplumServerConfig): Promise<void> {
     if (jwk.alg === OAuthSigningAlgorithm.ES256) {
       publicKey.x = jwk.x;
       publicKey.y = jwk.y;
-      publicKey.crv = jwk.crv as string;
+      publicKey.crv = jwk.crv;
     } else {
       publicKey.e = jwk.e;
       publicKey.n = jwk.n;
@@ -163,14 +164,15 @@ export async function initKeys(config: MedplumServerConfig): Promise<void> {
 
     // Convert from JWK to PKCS and add to the collection of public keys
     publicKeys[jwk.id as string] = (await importJWK(publicKey)) as KeyLike;
+    allSigningKeys[jwk.id as string] = (await importJWK({
+      ...(jwk as JWK),
+      use: 'sig',
+    })) as KeyLike;
   }
 
   // Use the first key as the signing key
   jsonWebKey = jsonWebKeys[0];
-  signingKey = (await importJWK({
-    ...(jsonWebKey as JWK),
-    use: 'sig',
-  })) as KeyLike;
+  defaultSigningKey = allSigningKeys[jsonWebKey.id as string];
 }
 
 /**
@@ -184,10 +186,23 @@ export function getJwks(): { keys: JWK[] } {
 
 /**
  * Returns the current signing key.
+ * @param alg - Optional signing algorithm.  If not provided, the default signing key will be returned.
  * @returns The current signing key.
  */
-export function getSigningKey(): KeyLike {
-  return signingKey as KeyLike;
+export function getSigningKey(alg?: string): KeyLike {
+  if (!alg) {
+    if (!defaultSigningKey) {
+      throw new Error('Signing key not initialized');
+    }
+    return defaultSigningKey;
+  }
+
+  const jwk = jsonWebKeys.find((key) => (key.alg ?? LEGACY_DEFAULT_ALG) === alg);
+  const key = jwk?.id ? allSigningKeys[jwk.id] : undefined;
+  if (!key) {
+    throw new Error(`Signing key not found for alg: ${alg}`);
+  }
+  return key;
 }
 
 /**
@@ -221,7 +236,7 @@ export function generateAccessToken(
   options?: { additionalClaims?: Record<string, string | number>; lifetime?: string }
 ): Promise<string> {
   const duration = options?.lifetime ?? DEFAULT_ACCESS_LIFETIME;
-  return generateJwt(duration, options?.additionalClaims ? { ...claims, ...options.additionalClaims } : claims);
+  return generateJwt(duration, { aud: issuer, ...claims, ...options?.additionalClaims });
 }
 
 /**
@@ -232,8 +247,7 @@ export function generateAccessToken(
  */
 export function generateRefreshToken(claims: MedplumRefreshTokenClaims, lifetime?: string): Promise<string> {
   const duration = lifetime ?? DEFAULT_REFRESH_LIFETIME;
-
-  return generateJwt(duration, claims);
+  return generateJwt(duration, { aud: issuer, ...claims });
 }
 
 /**
@@ -243,7 +257,7 @@ export function generateRefreshToken(claims: MedplumRefreshTokenClaims, lifetime
  * @returns Promise to generate and sign the JWT.
  */
 async function generateJwt(exp: string, claims: JWTPayload): Promise<string> {
-  if (!jsonWebKey || !signingKey || !issuer) {
+  if (!jsonWebKey || !defaultSigningKey || !issuer) {
     throw new Error('Signing key not initialized');
   }
 
@@ -258,12 +272,13 @@ async function generateJwt(exp: string, claims: JWTPayload): Promise<string> {
       kid: jsonWebKey.id,
       typ: 'JWT',
     })
+    .setJti(randomUUID())
     .setIssuedAt()
     .setNotBefore(new Date())
     .setIssuer(issuer)
-    .setAudience(claims.client_id as string)
+    .setAudience(claims.aud ?? (claims.client_id as string))
     .setExpirationTime(exp)
-    .sign(signingKey);
+    .sign(defaultSigningKey);
 }
 
 /**

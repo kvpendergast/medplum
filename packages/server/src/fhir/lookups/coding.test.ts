@@ -5,10 +5,10 @@ import { initAppServices, shutdownApp } from '../../app';
 import { loadTestConfig } from '../../config/loader';
 import { DatabaseMode, getDatabasePool } from '../../database';
 import { withTestContext } from '../../test.setup';
-import { getSystemRepo } from '../repo';
+import { getGlobalSystemRepo } from '../repo';
 
 describe('Coding lookup table', () => {
-  const systemRepo = getSystemRepo();
+  const systemRepo = getGlobalSystemRepo();
 
   beforeAll(async () => {
     const config = await loadTestConfig();
@@ -54,7 +54,7 @@ describe('Coding lookup table', () => {
       expect(properties.rows[0].target).toStrictEqual(targetId);
     }));
 
-  test('Omits codings from incomplete CodeSystem resource', () =>
+  test('Indexes codings from fragment CodeSystem resource', () =>
     withTestContext(async () => {
       const codeSystem: CodeSystem = {
         resourceType: 'CodeSystem',
@@ -72,6 +72,11 @@ describe('Coding lookup table', () => {
 
       const db = getDatabasePool(DatabaseMode.READER);
       const results = await db.query('SELECT code, display FROM "Coding" WHERE system = $1', [systemResource.id]);
-      expect(results.rowCount).toStrictEqual(0);
+      expect(results.rows.map((r) => `${r.code} (${r.display})`).sort()).toStrictEqual([
+        'AB (Ambulance)',
+        'CD (Cardiology)',
+        'E (Emergency)',
+        'F (Fibrillation)',
+      ]);
     }));
 });

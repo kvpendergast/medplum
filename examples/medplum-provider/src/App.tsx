@@ -1,160 +1,204 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { ProfileResource } from '@medplum/core';
 import { getReferenceString } from '@medplum/core';
+import { useDoseSpotNotifications } from '@medplum/dosespot-react';
+import { AppShell, Loading, Logo, useMedplum, useMedplumProfile } from '@medplum/react';
 import {
-  AppShell,
-  Loading,
-  Logo,
-  NotificationIcon,
-  useMedplum,
-  useMedplumNavigate,
-  useMedplumProfile,
-} from '@medplum/react';
-import {
-  IconCalendarMonth,
+  IconApps,
+  IconBook2,
+  IconCalendarEvent,
   IconClipboardCheck,
   IconMail,
-  IconPencil,
-  IconPuzzle,
-  IconTransformPoint,
-  IconUser,
+  IconPill,
+  IconPrinter,
+  IconQrcode,
+  IconSettingsAutomation,
+  IconUserPlus,
+  IconUsers,
 } from '@tabler/icons-react';
 import type { JSX } from 'react';
-import { Suspense } from 'react';
+import { Suspense, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useSearchParams } from 'react-router';
-import { DoseSpotIcon } from './components/DoseSpotIcon';
 import { TaskDetailsModal } from './components/tasks/TaskDetailsModal';
-import { hasDoseSpotIdentifier } from './components/utils';
+import { hasScriptSureIdentifier } from './components/utils';
+import { useDoseSpotAccess } from './hooks/useDoseSpotAccess';
 import './index.css';
+
+const SETUP_DISMISSED_KEY = 'medplum-provider-setup-completed';
+const PROVIDER_HIDE_GET_STARTED_SETTING = 'hideGetStarted';
+
 import { EncounterChartPage } from './pages/encounter/EncounterChartPage';
 import { EncounterModal } from './pages/encounter/EncounterModal';
+import { FaxPage } from './pages/fax/FaxPage';
+import { GetStartedPage } from './pages/getstarted/GetStartedPage';
 import { DoseSpotFavoritesPage } from './pages/integrations/DoseSpotFavoritesPage';
+import { DoseSpotNotificationsPage } from './pages/integrations/DoseSpotNotificationsPage';
 import { IntegrationsPage } from './pages/integrations/IntegrationsPage';
+import { ScriptSurePage } from './pages/integrations/ScriptSurePage';
 import { MessagesPage } from './pages/messages/MessagesPage';
 import { CommunicationTab } from './pages/patient/CommunicationTab';
+import { CoveragePage } from './pages/patient/CoveragePage';
+import { DocumentsPage } from './pages/patient/DocumentsPage';
 import { DoseSpotTab } from './pages/patient/DoseSpotTab';
 import { EditTab } from './pages/patient/EditTab';
 import { ExportTab } from './pages/patient/ExportTab';
 import { IntakeFormPage } from './pages/patient/IntakeFormPage';
 import { LabsPage } from './pages/patient/LabsPage';
+import { MedicationsPage } from './pages/patient/MedicationsPage';
 import { PatientPage } from './pages/patient/PatientPage';
 import { PatientSearchPage } from './pages/patient/PatientSearchPage';
+import { ScriptSureTab } from './pages/patient/ScriptSureTab';
 import { TasksTab } from './pages/patient/TasksTab';
 import { TimelineTab } from './pages/patient/TimelineTab';
+import { RegisterPage } from './pages/RegisterPage';
 import { ResourceCreatePage } from './pages/resource/ResourceCreatePage';
 import { ResourceDetailPage } from './pages/resource/ResourceDetailPage';
 import { ResourceEditPage } from './pages/resource/ResourceEditPage';
 import { ResourceHistoryPage } from './pages/resource/ResourceHistoryPage';
 import { ResourcePage } from './pages/resource/ResourcePage';
+import { ResourceSchedulingPage } from './pages/resource/ResourceSchedulingPage';
 import { SchedulePage } from './pages/schedule/SchedulePage';
+import { ScheduleSettingsPage } from './pages/schedule/ScheduleSettingsPage';
 import { SearchPage } from './pages/SearchPage';
 import { SignInPage } from './pages/SignInPage';
+import { SmartHealthLinkImportPage } from './pages/smart/SmartHealthLinkImportPage';
 import { SpacesPage } from './pages/spaces/SpacesPage';
 import { TasksPage } from './pages/tasks/TasksPage';
 
 export function App(): JSX.Element | null {
   const medplum = useMedplum();
   const profile = useMedplumProfile();
-  const navigate = useMedplumNavigate();
+  const doseSpotCount = useDoseSpotNotifications();
   const location = useLocation();
   const [searchParams] = useSearchParams();
+  const project = medplum.getProject();
+  const setupDisabledByProject =
+    project?.setting?.find((s) => s.name === PROVIDER_HIDE_GET_STARTED_SETTING)?.valueBoolean === true;
+  const [setupDismissedByUser, setSetupDismissedByUser] = useState(
+    () => localStorage.getItem(SETUP_DISMISSED_KEY) === 'true'
+  );
+  const setupDismissed = setupDisabledByProject || setupDismissedByUser;
+  const { hasAccess: hasDoseSpot } = useDoseSpotAccess();
+  const membership = medplum.getProjectMembership();
+  const hasScriptSure = hasScriptSureIdentifier(membership);
+
+  const handleDismissSetup = (): void => {
+    localStorage.setItem(SETUP_DISMISSED_KEY, 'true');
+    setSetupDismissedByUser(true);
+  };
 
   if (medplum.isLoading()) {
     return null;
   }
-
-  const membership = medplum.getProjectMembership();
-  const hasDoseSpot = hasDoseSpotIdentifier(membership);
 
   return (
     <AppShell
       logo={<Logo size={24} />}
       pathname={location.pathname}
       searchParams={searchParams}
+      layoutVersion="v2"
+      showLayoutVersionToggle={false}
       menus={
         profile
           ? [
               {
                 links: [
-                  { icon: <IconPuzzle />, label: 'Spaces', href: '/Spaces/Communication' },
+                  { icon: <IconBook2 />, label: 'Spaces', href: '/Spaces/Communication' },
                   {
-                    icon: <IconUser />,
+                    icon: <IconUsers />,
                     label: 'Patients',
                     href: '/Patient?_count=20&_fields=name,email,gender&_sort=-_lastUpdated',
                   },
-                  { icon: <IconCalendarMonth />, label: 'Schedule', href: '/schedule' },
+                  { icon: <IconCalendarEvent />, label: 'Schedule', href: `/Calendar/Schedule` },
                   {
-                    icon: (
-                      <NotificationIcon
-                        resourceType="Communication"
-                        countCriteria={`recipient=${getReferenceString(profile)}&status:not=completed&_summary=count`}
-                        subscriptionCriteria={`Communication?recipient=${getReferenceString(profile)}`}
-                        iconComponent={<IconMail />}
-                      />
-                    ),
+                    icon: <IconMail />,
                     label: 'Messages',
-                    href: `/Communication?recipient=${getReferenceString(profile)}&status:not=completed&_fields=sender,recipient,subject,status,_lastUpdated`,
+                    href: `/Communication?status=in-progress`,
+                    notificationCount: {
+                      resourceType: 'Communication',
+                      countCriteria:
+                        'status=in-progress&_has:Communication:part-of:_id:not=null&identifier:not=ai-message-topic&_summary=count',
+                      subscriptionCriteria: `Communication?status=in-progress&_has:Communication:part-of:_id:not=null&identifier:not=ai-message-topic`,
+                    },
                   },
                   {
-                    icon: (
-                      <NotificationIcon
-                        resourceType="Task"
-                        countCriteria={`owner=${getReferenceString(profile)}&status=requested,ready,received,accepted,in-progress,draft&_summary=count`}
-                        subscriptionCriteria={`Task?owner=${getReferenceString(profile)}&status=requested,ready,received,accepted,in-progress,draft`}
-                        iconComponent={<IconClipboardCheck />}
-                      />
-                    ),
+                    icon: <IconClipboardCheck />,
                     label: 'Tasks',
                     href: `/Task?owner=${getReferenceString(profile)}&_sort=-_lastUpdated&status=requested,ready,received,accepted,in-progress,draft`,
+                    notificationCount: {
+                      resourceType: 'Task',
+                      countCriteria: `owner=${getReferenceString(profile)}&status=requested,ready,received,accepted,in-progress,draft&_summary=count`,
+                      subscriptionCriteria: `Task?owner=${getReferenceString(profile)}&status=requested,ready,received,accepted,in-progress,draft`,
+                    },
                   },
+                  { icon: <IconPrinter />, label: 'Faxes', href: '/Fax/Communication' },
                 ],
               },
               {
                 title: 'Quick Links',
                 links: [
-                  { icon: <IconPencil />, label: 'New Patient', href: '/onboarding' },
-                  { icon: <IconTransformPoint />, label: 'Integrations', href: '/integrations' },
-                  ...(hasDoseSpot
-                    ? [{ icon: <DoseSpotIcon />, label: 'DoseSpot', href: '/integrations/dosespot' }]
+                  ...(!setupDismissed
+                    ? [
+                        {
+                          icon: <IconSettingsAutomation />,
+                          label: 'Get Started',
+                          href: '/getstarted',
+                          onDismiss: handleDismissSetup,
+                        },
+                      ]
                     : []),
+                  { icon: <IconUserPlus />, label: 'New Patient', href: '/onboarding' },
+                  { icon: <IconApps />, label: 'Integrations', href: '/integrations' },
+                  ...(hasDoseSpot
+                    ? [
+                        {
+                          icon: <IconPill />,
+                          label: 'DoseSpot',
+                          href: '/dosespot',
+                          alert: true,
+                          count: doseSpotCount ?? 0,
+                        },
+                      ]
+                    : []),
+                  ...(hasScriptSure
+                    ? [
+                        {
+                          icon: <IconPill />,
+                          label: 'ScriptSure',
+                          href: '/scriptsure',
+                        },
+                      ]
+                    : []),
+                  { icon: <IconQrcode />, label: 'SMART Health Link', href: '/smart-health-link' },
                 ],
               },
             ]
           : undefined
       }
       resourceTypeSearchDisabled={true}
-      notifications={
-        profile && (
-          <>
-            <NotificationIcon
-              label="Tasks"
-              resourceType="Task"
-              countCriteria={`owner=${getReferenceString(profile as ProfileResource)}&status:not=completed&_summary=count`}
-              subscriptionCriteria={`Task?owner=${getReferenceString(profile as ProfileResource)}`}
-              iconComponent={<IconClipboardCheck />}
-              onClick={() =>
-                navigate(
-                  `/Task?owner=${getReferenceString(profile as ProfileResource)}&status:not=completed&_fields=subject,code,description,status,_lastUpdated`
-                )
-              }
-            />
-            {hasDoseSpot && <DoseSpotIcon />}
-          </>
-        )
-      }
+      spotlightPatientsOnly={true}
     >
       <Suspense fallback={<Loading />}>
         <Routes>
           {profile ? (
             <>
+              <Route path="/getstarted" element={<GetStartedPage />} />
               <Route path="/Spaces/Communication" element={<SpacesPage />}>
                 <Route index element={<SpacesPage />} />
                 <Route path=":topicId" element={<SpacesPage />} />
               </Route>
               <Route
                 path="/"
-                element={<Navigate to="/Patient?_count=20&_fields=name,email,gender&_sort=-_lastUpdated" replace />}
+                element={
+                  <Navigate
+                    to={
+                      setupDismissed
+                        ? '/Patient?_count=20&_fields=name,email,gender&_sort=-_lastUpdated'
+                        : '/getstarted'
+                    }
+                    replace
+                  />
+                }
               />
               <Route path="/Patient/new" element={<ResourceCreatePage />} />
               <Route path="/Patient/:patientId" element={<PatientPage />}>
@@ -168,11 +212,19 @@ export function App(): JSX.Element | null {
                 <Route path="Task" element={<TasksTab />} />
                 <Route path="Task/:taskId" element={<TasksTab />} />
                 {hasDoseSpot && <Route path="dosespot" element={<DoseSpotTab />} />}
+                {hasScriptSure && <Route path="scriptsure" element={<ScriptSureTab />} />}
                 <Route path="timeline" element={<TimelineTab />} />
                 <Route path="export" element={<ExportTab />} />
                 <Route path="ServiceRequest" element={<LabsPage />} />
                 <Route path="ServiceRequest/:serviceRequestId" element={<LabsPage />} />
+                <Route path="MedicationRequest" element={<MedicationsPage />} />
+                <Route path="MedicationRequest/:medicationRequestId" element={<MedicationsPage />} />
+                <Route path="DocumentReference" element={<DocumentsPage />} />
+                <Route path="DocumentReference/:documentId" element={<DocumentsPage />} />
                 <Route path=":resourceType" element={<PatientSearchPage />} />
+                <Route path="Coverage" element={<CoveragePage />} />
+                <Route path="Coverage/:coverageId" element={<CoveragePage />} />
+                <Route path="Coverage/:coverageId/CoverageEligibilityRequest/:requestId" element={<CoveragePage />} />
                 <Route path=":resourceType/new" element={<ResourceCreatePage />} />
                 <Route path=":resourceType/:id" element={<ResourcePage />}>
                   <Route path="" element={<ResourceDetailPage />} />
@@ -185,25 +237,35 @@ export function App(): JSX.Element | null {
                 <Route index element={<MessagesPage />} />
                 <Route path=":messageId" element={<MessagesPage />} />
               </Route>
-              <Route path="Task" element={<TasksPage />} />
-              <Route path="Task/:taskId" element={<TasksPage />} />
+              <Route path="/Task" element={<TasksPage />} />
+              <Route path="/Task/:taskId" element={<TasksPage />} />
+              <Route path="/Fax/Communication" element={<FaxPage />} />
+              <Route path="/Fax/Communication/:faxId" element={<FaxPage />} />
               <Route path="/onboarding" element={<IntakeFormPage />} />
-              <Route path="/schedule" element={<SchedulePage />} />
+              <Route path="/Calendar/Schedule" element={<SchedulePage />} />
+              <Route path="/Calendar/Schedule/:id" element={<SchedulePage />} />
+              <Route path="/Calendar/Schedule/:id/settings" element={<ScheduleSettingsPage />} />
               <Route path="/signin" element={<SignInPage />} />
-              <Route path="/dosespot" element={<DoseSpotTab />} />
+              <Route path="/register" element={<RegisterPage />} />
+              {hasDoseSpot && <Route path="/dosespot" element={<DoseSpotNotificationsPage />} />}
+              {hasScriptSure && <Route path="/scriptsure" element={<ScriptSurePage />} />}
               <Route path="/integrations" element={<IntegrationsPage />} />
+              <Route path="/smart-health-link" element={<SmartHealthLinkImportPage />} />
               <Route path="/:resourceType" element={<SearchPage />} />
               <Route path="/:resourceType/new" element={<ResourceCreatePage />} />
               <Route path="/:resourceType/:id" element={<ResourcePage />}>
                 <Route path="" element={<ResourceDetailPage />} />
+                <Route path="details" element={<ResourceDetailPage />} />
                 <Route path="edit" element={<ResourceEditPage />} />
                 <Route path="history" element={<ResourceHistoryPage />} />
+                <Route path="scheduling" element={<ResourceSchedulingPage />} />
               </Route>
               {hasDoseSpot && <Route path="/integrations/dosespot" element={<DoseSpotFavoritesPage />} />}
             </>
           ) : (
             <>
               <Route path="/signin" element={<SignInPage />} />
+              <Route path="/register" element={<RegisterPage />} />
               <Route path="*" element={<Navigate to="/signin" replace />} />
             </>
           )}

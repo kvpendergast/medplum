@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
-import type { AccessPolicy } from '@medplum/fhirtypes';
+import type { WithId } from '@medplum/core';
+import { AccessPolicyInteraction, accessPolicySupportsInteraction } from '@medplum/core';
+import type { AccessPolicy, Login, Project, ProjectMembership } from '@medplum/fhirtypes';
+import express from 'express';
 import { randomUUID } from 'node:crypto';
+import { initApp } from '../app';
+import { loadTestConfig } from '../config/loader';
+import type { AuthState } from '../oauth/middleware';
+import { createTestProject } from '../test.setup';
 import type { PopulatedAccessPolicy } from './accesspolicy';
 import { applySmartScopes, parseSmartScopes } from './smart';
 
@@ -77,165 +84,305 @@ describe('SMART on FHIR', () => {
     ]);
   });
 
-  test('Do not change access policy', () => {
-    const startAccessPolicy: PopulatedAccessPolicy = {
-      resourceType: 'AccessPolicy',
-      resource: [
+  describe('applySmartScopes()', () => {
+    let project: WithId<Project>;
+    let login: WithId<Login>;
+    let membership: WithId<ProjectMembership>;
+
+    const app = express();
+
+    beforeAll(async () => {
+      const config = await loadTestConfig();
+      await initApp(app, config);
+      ({ project, login, membership } = await createTestProject({ withAccessToken: true, withClient: true }));
+    });
+
+    test('Do not change access policy', () => {
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation' },
+          { resourceType: 'Patient' },
+          { resourceType: 'VisionPrescription' },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'openid' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      expect(applySmartScopes(startAccessPolicy, authState)).toMatchObject({
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation' },
+          { resourceType: 'Patient' },
+          { resourceType: 'VisionPrescription' },
+        ],
+      });
+    });
+
+    test('Generate access policy', () => {
+      const authState: AuthState = {
+        login: { ...login, scope: 'patient/Observation.cruds patient/Patient.cruds' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+      expect(
+        applySmartScopes({ resourceType: 'AccessPolicy', resource: [{ resourceType: '*' }] }, authState)
+      ).toMatchObject({
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Observation' }, { resourceType: 'Patient' }],
+      });
+    });
+
+    test('Intersect access policy', () => {
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation' },
+          { resourceType: 'Patient' },
+          { resourceType: 'VisionPrescription' },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'patient/Patient.cruds patient/ServiceRequest.cruds' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      expect(applySmartScopes(startAccessPolicy, authState)).toMatchObject({
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Patient' }],
+      });
+    });
+
+    test('Intersect with system wildcard read scope', () => {
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation' },
+          { resourceType: 'Patient' },
+          { resourceType: 'VisionPrescription' },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'system/*.read' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      const result = applySmartScopes(startAccessPolicy, authState);
+      expect(result).toMatchObject<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        resource: [
+          {
+            resourceType: 'Observation',
+            readonly: true,
+          },
+          {
+            resourceType: 'Patient',
+            readonly: true,
+          },
+          {
+            resourceType: 'VisionPrescription',
+            readonly: true,
+          },
+        ],
+      });
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.READ, 'Observation')).toBe(true);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.SEARCH, 'Patient')).toBe(true);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.UPDATE, 'VisionPrescription')).toBe(false);
+    });
+
+    test('Intersect with patient and system wildcard read scopes', () => {
+      const patientId = randomUUID();
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation' },
+          { resourceType: 'Patient' },
+          { resourceType: 'VisionPrescription' },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'patient/*.read system/*.read' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+        smartAppLaunch: {
+          resourceType: 'SmartAppLaunch',
+          id: randomUUID(),
+          patient: { reference: `Patient/${patientId}` },
+        },
+      };
+
+      const result = applySmartScopes(startAccessPolicy, authState);
+      expect(result.resource).toMatchObject([
         {
           resourceType: 'Observation',
+          readonly: true,
+          criteria: `Observation?_compartment=Patient/${patientId}`,
+        },
+        {
+          resourceType: 'Observation',
+          readonly: true,
         },
         {
           resourceType: 'Patient',
+          readonly: true,
+          criteria: `Patient?_compartment=Patient/${patientId}`,
+        },
+        {
+          resourceType: 'Patient',
+          readonly: true,
         },
         {
           resourceType: 'VisionPrescription',
-        },
-      ],
-    };
-
-    const scope = 'openid';
-
-    expect(applySmartScopes(startAccessPolicy, scope)).toMatchObject({
-      resourceType: 'AccessPolicy',
-      resource: [
-        {
-          resourceType: 'Observation',
-        },
-        {
-          resourceType: 'Patient',
+          readonly: true,
+          criteria: `VisionPrescription?_compartment=Patient/${patientId}`,
         },
         {
           resourceType: 'VisionPrescription',
-        },
-      ],
-    });
-  });
-
-  test('Generate access policy', () => {
-    expect(
-      applySmartScopes(
-        { resourceType: 'AccessPolicy', resource: [{ resourceType: '*' }] },
-        'patient/Observation.cruds patient/Patient.cruds'
-      )
-    ).toMatchObject({
-      resourceType: 'AccessPolicy',
-      resource: [
-        {
-          resourceType: 'Observation',
-        },
-        {
-          resourceType: 'Patient',
-        },
-      ],
-    });
-  });
-
-  test('Intersect access policy', () => {
-    const startAccessPolicy: PopulatedAccessPolicy = {
-      resourceType: 'AccessPolicy',
-      resource: [
-        {
-          resourceType: 'Observation',
-        },
-        {
-          resourceType: 'Patient',
-        },
-        {
-          resourceType: 'VisionPrescription',
-        },
-      ],
-    };
-
-    const scope = 'patient/Patient.cruds patient/ServiceRequest.cruds';
-
-    expect(applySmartScopes(startAccessPolicy, scope)).toMatchObject({
-      resourceType: 'AccessPolicy',
-      resource: [
-        {
-          resourceType: 'Patient',
-        },
-      ],
-    });
-  });
-
-  test('Intersect with wildcard access policy', () => {
-    const startAccessPolicy: PopulatedAccessPolicy = {
-      resourceType: 'AccessPolicy',
-      resource: [
-        { resourceType: 'StructureDefinition', readonly: true },
-        { resourceType: 'SearchParameter', readonly: true },
-        { resourceType: '*' },
-      ],
-    };
-
-    const scope = 'patient/Patient.rs patient/StructureDefinition.* patient/Practitioner.rus';
-
-    expect(applySmartScopes(startAccessPolicy, scope)).toMatchObject<AccessPolicy>({
-      resourceType: 'AccessPolicy',
-      resource: [
-        { resourceType: 'StructureDefinition', readonly: true },
-        { resourceType: 'Patient', readonly: true },
-        { resourceType: 'StructureDefinition' }, // Expanded from *
-        { resourceType: 'Practitioner' },
-      ],
-    });
-  });
-
-  test('Intersect with granular scopes and criteria', () => {
-    const id = randomUUID();
-    const compartment = `Patient/${id}`;
-    const startAccessPolicy: PopulatedAccessPolicy = {
-      resourceType: 'AccessPolicy',
-      resource: [
-        { resourceType: 'Patient', readonly: true, criteria: 'Patient?_id=' + id },
-        { resourceType: 'Practitioner', readonly: true },
-        {
-          resourceType: 'Goal',
-          criteria: 'Goal?identifier=http://example.com/patientVisible|true&_compartment=' + compartment,
-        },
-        { resourceType: '*', criteria: '*?_compartment=' + compartment },
-      ],
-    };
-
-    const scope =
-      'patient/Patient.* patient/Practitioner.rus?identifier=http://hl7.org/fhir/sid/us-npi|1234567893 patient/Goal.rs?category=nursing patient/Condition.rus?category=encounter-diagnosis patient/Condition.rus?category=health-concern';
-
-    expect(applySmartScopes(startAccessPolicy, scope)).toMatchObject<AccessPolicy>({
-      resourceType: 'AccessPolicy',
-      resource: [
-        { resourceType: 'Patient', readonly: true, criteria: 'Patient?_id=' + id },
-        {
-          resourceType: 'Practitioner',
           readonly: true,
-          criteria: 'Practitioner?identifier=http://hl7.org/fhir/sid/us-npi|1234567893',
         },
-        {
-          resourceType: 'Goal',
-          readonly: true,
-          criteria: `Goal?identifier=http://example.com/patientVisible|true&_compartment=${compartment}&category=nursing`,
-        },
-        {
-          resourceType: 'Patient',
-          criteria: `Patient?_compartment=${compartment}`,
-        },
-        {
-          resourceType: 'Practitioner',
-          criteria: `Practitioner?_compartment=${compartment}&identifier=http://hl7.org/fhir/sid/us-npi|1234567893`,
-        },
-        {
-          resourceType: 'Goal',
-          readonly: true,
-          criteria: `Goal?_compartment=${compartment}&category=nursing`,
-        },
-        {
-          resourceType: 'Condition',
-          criteria: `Condition?_compartment=${compartment}&category=encounter-diagnosis`,
-        },
-        {
-          resourceType: 'Condition',
-          criteria: `Condition?_compartment=${compartment}&category=health-concern`,
-        },
-      ],
+      ]);
+      expect(result.resource.filter((r) => r.resourceType === 'Observation' && !r.criteria)).toHaveLength(1);
+      expect(result.resource.filter((r) => r.resourceType === 'Patient' && !r.criteria)).toHaveLength(1);
+      expect(result.resource.filter((r) => r.resourceType === 'VisionPrescription' && !r.criteria)).toHaveLength(1);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.UPDATE, 'Observation')).toBe(false);
+    });
+
+    test('Intersect system wildcard read scope with explicit interactions', () => {
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Observation', interaction: ['create', 'read', 'update', 'search'] },
+          { resourceType: 'Patient', interaction: ['create', 'update', 'delete'] },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'system/*.read' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      const result = applySmartScopes(startAccessPolicy, authState);
+      expect(result).toMatchObject<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        resource: [{ resourceType: 'Observation', readonly: true, interaction: ['read', 'search'] }],
+      });
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.READ, 'Observation')).toBe(true);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.SEARCH, 'Observation')).toBe(true);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.UPDATE, 'Observation')).toBe(false);
+      expect(accessPolicySupportsInteraction(result, AccessPolicyInteraction.READ, 'Patient')).toBe(false);
+    });
+
+    test('Intersect with wildcard access policy', () => {
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'StructureDefinition', readonly: true },
+          { resourceType: 'SearchParameter', readonly: true },
+          { resourceType: '*' },
+        ],
+      };
+
+      const authState: AuthState = {
+        login: { ...login, scope: 'patient/Patient.rs patient/StructureDefinition.* patient/Practitioner.rus' },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      expect(applySmartScopes(startAccessPolicy, authState)).toMatchObject<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'StructureDefinition', readonly: true },
+          { resourceType: 'Patient', readonly: true },
+          { resourceType: 'StructureDefinition' }, // Expanded from *
+          { resourceType: 'Practitioner' },
+        ],
+      });
+    });
+
+    test('Intersect with granular scopes and criteria', () => {
+      const id = randomUUID();
+      const compartment = `Patient/${id}`;
+      const startAccessPolicy: PopulatedAccessPolicy = {
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Patient', readonly: true, criteria: 'Patient?_id=' + id },
+          { resourceType: 'Practitioner', readonly: true },
+          {
+            resourceType: 'Goal',
+            criteria: 'Goal?identifier=http://example.com/patientVisible|true&_compartment=' + compartment,
+          },
+          { resourceType: '*', criteria: '*?_compartment=' + compartment },
+        ],
+      };
+
+      const scope = [
+        'patient/Patient.*',
+        'patient/Practitioner.rus?identifier=http://hl7.org/fhir/sid/us-npi|1234567893',
+        'patient/Goal.rs?category=nursing',
+        'patient/Condition.rus?category=encounter-diagnosis',
+        'patient/Condition.rus?category=health-concern',
+      ].join(' ');
+      const authState: AuthState = {
+        login: { ...login, scope },
+        membership,
+        project,
+        userConfig: { resourceType: 'UserConfiguration' },
+      };
+
+      expect(applySmartScopes(startAccessPolicy, authState)).toMatchObject<AccessPolicy>({
+        resourceType: 'AccessPolicy',
+        resource: [
+          { resourceType: 'Patient', readonly: true, criteria: 'Patient?_id=' + id },
+          {
+            resourceType: 'Practitioner',
+            readonly: true,
+            criteria: 'Practitioner?identifier=http://hl7.org/fhir/sid/us-npi|1234567893',
+          },
+          {
+            resourceType: 'Goal',
+            readonly: true,
+            criteria: `Goal?identifier=http://example.com/patientVisible|true&_compartment=${compartment}&category=nursing`,
+          },
+          {
+            resourceType: 'Patient',
+            criteria: `Patient?_compartment=${compartment}`,
+          },
+          {
+            resourceType: 'Practitioner',
+            criteria: `Practitioner?_compartment=${compartment}&identifier=http://hl7.org/fhir/sid/us-npi|1234567893`,
+          },
+          {
+            resourceType: 'Goal',
+            readonly: true,
+            criteria: `Goal?_compartment=${compartment}&category=nursing`,
+          },
+          {
+            resourceType: 'Condition',
+            criteria: `Condition?_compartment=${compartment}&category=encounter-diagnosis`,
+          },
+          {
+            resourceType: 'Condition',
+            criteria: `Condition?_compartment=${compartment}&category=health-concern`,
+          },
+        ],
+      });
     });
   });
 });

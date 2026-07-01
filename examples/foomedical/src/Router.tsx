@@ -22,20 +22,21 @@ import { Vaccine } from './pages/health-record/Vaccine';
 import { Vaccines } from './pages/health-record/Vaccines';
 import { Vitals } from './pages/health-record/Vitals';
 import { HomePage } from './pages/HomePage';
-import { Messages } from './pages/MessagesPage';
-import { MessageTable } from './pages/MessageTablePage';
+import { MessagesPage } from './pages/MessagesPage';
 import { ObservationPage } from './pages/ObservationPage';
 import { PatientIntakeQuestionnairePage } from './pages/PatientIntakeQuestionnairePage';
 import { QuestionnairePage } from './pages/QuestionnairePage';
 import { ScreeningQuestionnairePage } from './pages/ScreeningQuestionnairePage';
 import { SignOutPage } from './pages/SignOutPage';
+import { SmartHealthLinksPage } from './pages/SmartHealthLinksPage';
 
 export function Router(): JSX.Element {
   return (
     <Routes>
       <Route path="/" element={<HomePage />} />
-      <Route path="messages/" element={<MessageTable />} />
-      <Route path="messages/:practitionerId" element={<Messages />} />
+      <Route path="Communication" element={<MessagesPage />}>
+        <Route path=":messageId" element={<MessagesPage />} />
+      </Route>
       <Route path="Questionnaire/:questionnaireId" element={<QuestionnairePage />} />
       <Route path="screening-questionnaire" element={<ScreeningQuestionnairePage />} />
       <Route path="patient-intake-questionnaire" element={<PatientIntakeQuestionnairePage />} />
@@ -59,6 +60,7 @@ export function Router(): JSX.Element {
         <Route path="action-items/:itemId" element={<ActionItem />} />
       </Route>
       <Route path="get-care" element={<GetCare />} />
+      <Route path="smart-health-links" element={<SmartHealthLinksPage />} />
       <Route path="account" element={<AccountPage />}>
         <Route index element={<Navigate replace to="/account/profile" />} />
         <Route path="profile" element={<Profile />} />

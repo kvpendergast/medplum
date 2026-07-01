@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   badRequest,
+  contentTooLarge,
   ContentType,
   parseLogLevel,
   unsupportedMediaType,
@@ -22,21 +23,27 @@ import { authRouter } from './auth/routes';
 import { cdsRouter } from './cds/routes';
 import { getConfig } from './config/loader';
 import type { MedplumServerConfig } from './config/types';
-import { attachRequestContext, AuthenticatedRequestContext, closeRequestContext, getRequestContext } from './context';
+import {
+  attachRequestContext,
+  AuthenticatedRequestContext,
+  closeRequestContext,
+  tryGetRequestContext,
+} from './context';
 import { corsOptions } from './cors';
 import { closeDatabase, initDatabase } from './database';
 import { dicomRouter } from './dicom/routes';
 import { emailRouter } from './email/routes';
 import { binaryRouter } from './fhir/binary';
+import { smartHealthLinkRouter } from './fhir/operations/smarthealthlinks';
 import { sendOutcome } from './fhir/outcomes';
 import { fhirRouter } from './fhir/routes';
 import { loadStructureDefinitions } from './fhir/structure';
 import { fhircastSTU2Router, fhircastSTU3Router } from './fhircast/routes';
-import { healthcheckHandler } from './healthcheck';
+import { cleanupReservedDatabaseConnections, healthcheckHandler } from './healthcheck';
 import { cleanupHeartbeat, initHeartbeat } from './heartbeat';
 import { hl7BodyParser } from './hl7/parser';
 import { keyValueRouter } from './keyvalue/routes';
-import { getLogger, globalLogger } from './logger';
+import { drainStdout, getLogger, globalLogger } from './logger';
 import { mcpRouter } from './mcp/routes';
 import { maybeAutoRunPendingPostDeployMigration } from './migrations/migration-utils';
 import { initKeys } from './oauth/keys';
@@ -52,9 +59,9 @@ import { initServerRegistryHeartbeatListener } from './server-registry';
 import { initBinaryStorage } from './storage/loader';
 import { storageRouter } from './storage/routes';
 import { webhookRouter } from './webhook/routes';
-import { closeWebSockets, initWebSockets } from './websockets';
 import { wellKnownRouter } from './wellknown';
 import { closeWorkers, initWorkers } from './workers';
+import { closeWebSockets, initWebSockets } from './ws/routes';
 
 let server: http.Server | undefined = undefined;
 
@@ -130,12 +137,21 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
   if (err.type === 'request.aborted') {
     return;
   }
+  if (err.code === 'ECONNRESET' && err.message?.includes('aborted')) {
+    // this could be handled/suppressed in an http server 'error' event handler
+    // Error: aborted
+    //   at abortIncoming (node:_http_server:848:17)
+    //   at socketOnClose (node:_http_server:842:3)
+    //   at Socket.emit (node:events:521:24)
+    //   at TCP.<anonymous> (node:net:350:12)
+    return;
+  }
   if (err.type === 'entity.parse.failed') {
     sendOutcome(res, badRequest('Content could not be parsed'));
     return;
   }
-  if (err.type === 'entity.too.large') {
-    sendOutcome(res, badRequest('File too large'));
+  if (err.type === 'entity.too.large' || err.type === 'parameters.too.many') {
+    sendOutcome(res, contentTooLarge('Request body too large'));
     return;
   }
   if (err.type === 'stream.not.readable') {
@@ -149,6 +165,11 @@ function errorHandler(err: any, req: Request, res: Response, next: NextFunction)
   }
   if (err.name === 'UnsupportedMediaTypeError') {
     sendOutcome(res, unsupportedMediaType);
+    return;
+  }
+  if (err instanceof URIError && 'status' in err && err.status === 400) {
+    // the router package sets err.status to 400 when decodeURIComponent throws a URIError
+    sendOutcome(res, badRequest(err.message));
     return;
   }
   getLogger().error('Unhandled error', err);
@@ -166,6 +187,10 @@ export async function initApp(app: Express, config: MedplumServerConfig): Promis
 
   await initAppServices(config);
   server = http.createServer(app);
+  server.on('connect', (req, socket) => {
+    socket.write('HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    socket.end();
+  });
   initWebSockets(server);
 
   app.set('etag', false);
@@ -174,13 +199,11 @@ export async function initApp(app: Express, config: MedplumServerConfig): Promis
   app.use(standardHeaders);
   app.use(cors(corsOptions));
   app.use(compression());
-  app.use(attachRequestContext);
 
-  // Add logging middleware immediately after setting up request context, to ensure that
-  // any errors in later middleware don't skip the request logging
   if (config.logRequests) {
     app.use(loggingMiddleware);
   }
+  app.use(attachRequestContext);
 
   app.use(rateLimitHandler(config));
   app.use('/fhir/R4/Binary', binaryRouter);
@@ -215,6 +238,7 @@ export async function initApp(app: Express, config: MedplumServerConfig): Promis
   apiRouter.use('/keyvalue/v1/', keyValueRouter);
   apiRouter.use('/oauth2/', oauthRouter);
   apiRouter.use('/scim/v2/', scimRouter);
+  apiRouter.use('/shl/', smartHealthLinkRouter);
   apiRouter.use('/storage/', storageRouter);
   apiRouter.use('/webhook/', webhookRouter);
 
@@ -230,12 +254,12 @@ export async function initApp(app: Express, config: MedplumServerConfig): Promis
 
 export async function initAppServices(config: MedplumServerConfig): Promise<void> {
   loadStructureDefinitions();
-  initRedis(config.redis);
+  initRedis(config);
   await initDatabase(config);
+  initWorkers(config);
   await seedDatabase(config);
   await initKeys(config);
   initBinaryStorage(config.binaryStorage);
-  initWorkers(config);
   initHeartbeat(config);
   initOtelHeartbeat();
   initServerRegistryHeartbeatListener();
@@ -245,6 +269,7 @@ export async function initAppServices(config: MedplumServerConfig): Promise<void
 export async function shutdownApp(): Promise<void> {
   cleanupOtelHeartbeat();
   cleanupHeartbeat();
+  cleanupReservedDatabaseConnections();
   await closeWebSockets();
   if (server) {
     await new Promise((resolve) => {
@@ -263,16 +288,17 @@ export async function shutdownApp(): Promise<void> {
   if (binaryStorage?.startsWith('file:' + join(tmpdir(), 'medplum-temp-storage'))) {
     rmSync(binaryStorage.replace('file:', ''), { recursive: true, force: true });
   }
+
+  await drainStdout();
 }
 
 const loggingMiddleware = (req: Request, res: Response, next: NextFunction): void => {
-  const ctx = getRequestContext();
   const start = new Date();
 
   res.on('close', () => {
+    const ctx = tryGetRequestContext();
     const duration = Date.now() - start.valueOf();
-
-    ctx.logger.info('Request served', {
+    getLogger().info('Request served', {
       durationMs: duration,
       ip: req.ip,
       method: req.method,
@@ -282,6 +308,7 @@ const loggingMiddleware = (req: Request, res: Response, next: NextFunction): voi
       status: res.writableFinished ? res.statusCode : 408,
       ua: req.get('User-Agent'),
       mode: ctx instanceof AuthenticatedRequestContext ? ctx.repo.mode : undefined,
+      fhirQuota: ctx?.fhirRateLimiter?.unitsConsumed,
     });
   });
 

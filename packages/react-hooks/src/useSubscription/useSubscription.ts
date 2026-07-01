@@ -4,7 +4,7 @@ import type { SubscriptionEmitter, SubscriptionEventMap } from '@medplum/core';
 import { deepEquals } from '@medplum/core';
 import type { Bundle, Subscription } from '@medplum/fhirtypes';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useMedplum } from '../MedplumProvider/MedplumProvider.context';
+import { useMedplum, useMedplumProfile } from '../MedplumProvider/MedplumProvider.context';
 
 const SUBSCRIPTION_DEBOUNCE_MS = 3000;
 
@@ -44,6 +44,12 @@ export function useSubscription(
   options?: UseSubscriptionOptions
 ): void {
   const medplum = useMedplum();
+  const profile = useMedplumProfile();
+  // When the user is not authenticated, the subscription becomes a no-op. Subscribing would
+  // create a `Subscription` resource and request a WebSocket binding token, both of which 401
+  // without a profile. Treating criteria as `undefined` skips all subscription work; when the
+  // user authenticates, `profile` changes and the effect re-runs to subscribe.
+  const effectiveCriteria = profile ? criteria : undefined;
   const [emitter, setEmitter] = useState<SubscriptionEmitter>();
   // We don't memoize the entire options object since it contains callbacks and if the callbacks change identity, we don't want to trigger a resubscribe to criteria
   const [memoizedSubProps, setMemoizedSubProps] = useState(options?.subscriptionProps);
@@ -54,26 +60,22 @@ export function useSubscription(
   const prevCriteriaRef = useRef<string | undefined>(undefined);
   const prevMemoizedSubPropsRef = useRef<UseSubscriptionOptions['subscriptionProps']>(undefined);
 
-  const callbackRef = useRef<typeof callback>(callback);
+  const callbackRef = useRef(callback);
   callbackRef.current = callback;
 
-  const onWebSocketOpenRef = useRef<UseSubscriptionOptions['onWebSocketOpen']>(options?.onWebSocketOpen);
+  const onWebSocketOpenRef = useRef(options?.onWebSocketOpen);
   onWebSocketOpenRef.current = options?.onWebSocketOpen;
 
-  const onWebSocketCloseRef = useRef<UseSubscriptionOptions['onWebSocketClose']>(options?.onWebSocketClose);
+  const onWebSocketCloseRef = useRef(options?.onWebSocketClose);
   onWebSocketCloseRef.current = options?.onWebSocketClose;
 
-  const onSubscriptionConnectRef = useRef<UseSubscriptionOptions['onSubscriptionConnect']>(
-    options?.onSubscriptionConnect
-  );
+  const onSubscriptionConnectRef = useRef(options?.onSubscriptionConnect);
   onSubscriptionConnectRef.current = options?.onSubscriptionConnect;
 
-  const onSubscriptionDisconnectRef = useRef<UseSubscriptionOptions['onSubscriptionDisconnect']>(
-    options?.onSubscriptionDisconnect
-  );
+  const onSubscriptionDisconnectRef = useRef(options?.onSubscriptionDisconnect);
   onSubscriptionDisconnectRef.current = options?.onSubscriptionDisconnect;
 
-  const onErrorRef = useRef<UseSubscriptionOptions['onError']>(options?.onError);
+  const onErrorRef = useRef(options?.onError);
   onErrorRef.current = options?.onError;
 
   useEffect(() => {
@@ -90,7 +92,10 @@ export function useSubscription(
     }
 
     let shouldSubscribe = false;
-    if (prevCriteriaRef.current !== criteria || !deepEquals(prevMemoizedSubPropsRef.current, memoizedSubProps)) {
+    if (
+      prevCriteriaRef.current !== effectiveCriteria ||
+      !deepEquals(prevMemoizedSubPropsRef.current, memoizedSubProps)
+    ) {
       shouldSubscribe = true;
     }
 
@@ -99,25 +104,25 @@ export function useSubscription(
     }
 
     // Set prev criteria and options to latest after checking them
-    prevCriteriaRef.current = criteria;
+    prevCriteriaRef.current = effectiveCriteria;
     prevMemoizedSubPropsRef.current = memoizedSubProps;
 
     // We do this after as to not immediately trigger re-render
-    if (shouldSubscribe && criteria) {
-      setEmitter(medplum.subscribeToCriteria(criteria, memoizedSubProps));
-    } else if (!criteria) {
+    if (shouldSubscribe && effectiveCriteria) {
+      setEmitter(medplum.subscribeToCriteria(effectiveCriteria, memoizedSubProps));
+    } else if (!effectiveCriteria) {
       setEmitter(undefined);
     }
 
     return () => {
       unsubTimerRef.current = setTimeout(() => {
         setEmitter(undefined);
-        if (criteria) {
-          medplum.unsubscribeFromCriteria(criteria, memoizedSubProps);
+        if (effectiveCriteria) {
+          medplum.unsubscribeFromCriteria(effectiveCriteria, memoizedSubProps);
         }
       }, SUBSCRIPTION_DEBOUNCE_MS);
     };
-  }, [medplum, criteria, memoizedSubProps]);
+  }, [medplum, effectiveCriteria, memoizedSubProps]);
 
   const emitterCallback = useCallback((event: SubscriptionEventMap['message']) => {
     callbackRef.current?.(event.payload);

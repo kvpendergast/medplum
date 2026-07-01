@@ -4,6 +4,10 @@ sidebar_position: 1
 
 # Sending Orders
 
+:::info[Prerequisites]
+For a vendor-neutral overview of diagnostic ordering concepts and the FHIR data model, see [Labs & Imaging](/docs/labs-imaging) and [Order Labs and Imaging](/docs/labs-imaging/ordering-labs-imaging).
+:::
+
 This guide explains how laboratory orders work in the Medplum-Health Gorilla labs integration.
 
 The high-level workflow for sending laboratory & imaging orders is:
@@ -109,7 +113,7 @@ const {
 | `setOrderNotes`                 | Adds notes/instructions for the lab                                                                             |
 | `createOrderBundle`             | Creates FHIR resources for the complete order                                                                   |
 | `setPerformingLab`              | Sets which lab will process the tests                                                                           |
-| `setPerformingLabAccountNumber` | Sets the clients lab account number to be used for selected lab (e.g. Quest account number)                     |
+| `setPerformingLabAccountNumber` | Overrides the practice-level lab account number for the order (see [Lab Account Numbers](#lab-account-numbers)) |
 | `validateOrder`                 | Checks order for required fields and valid data                                                                 |
 
 #### Example
@@ -122,8 +126,6 @@ Lab Selection:
   loadOptions={searchAvailableLabs}
   onChange={(e) => {
     setPerformingLab(e.value as Organization);
-    // Account number can be hardcoded or dynamic
-    setPerformingLabAccountNumber(accountNumber);
   }}
 />
 ```
@@ -227,6 +229,56 @@ async function handleOrderCreation() {
 }
 ```
 
+## Lab Account Numbers
+
+Some labs (notably **Labcorp**) require account numbers to be included with each order. Account number requirements vary by lab—some require none, some require one, and some require both of the following:
+
+### Physician-level account number
+
+Stored as an `identifier` on the `Practitioner` resource with type `AN` and an `assigner` reference pointing to the performing lab's `Organization` in Medplum. The `send-to-health-gorilla` bot automatically reads this identifier and includes it in the order—no form input required.
+
+```json
+{
+  "resourceType": "Practitioner",
+  "identifier": [
+    {
+      "type": {
+        "coding": [{ "system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "AN" }]
+      },
+      "value": "[PHYSICIAN_ACCOUNT_NUMBER]",
+      "assigner": { "reference": "Organization/[PERFORMING_LAB_ORGANIZATION_ID]" }
+    }
+  ]
+}
+```
+
+### Practice-level account number
+
+Stored as a nested extension on the `Practitioner` resource, keyed by lab. Each entry has a `lab` sub-extension (reference to the performing lab `Organization`) and a `value` sub-extension (the account number string). The bot automatically reads it and includes it in the order—no form input required.
+
+```json
+{
+  "resourceType": "Practitioner",
+  "extension": [
+    {
+      "url": "https://medplum.com/integrations/health-gorilla/lab-org-account",
+      "extension": [
+        { "url": "lab", "valueReference": { "reference": "Organization/[PERFORMING_LAB_ORGANIZATION_ID]" } },
+        { "url": "value", "valueString": "[PRACTICE_ACCOUNT_NUMBER]" }
+      ]
+    }
+  ]
+}
+```
+
+Multiple entries can be added per lab, and the bot will select the one matching the order's performing lab.
+
+If a practitioner orders under multiple practice-level accounts with the same lab (e.g. multiple clinic locations), you can override the account number at order time using `setPerformingLabAccountNumber` from the `useHealthGorillaLabOrder` hook:
+
+```tsx
+setPerformingLabAccountNumber(selectedAccountNumber);
+```
+
 ## FHIR Data Model
 
 Laboratory orders use a two-level hierarchy of FHIR resources, with a parent order containing multiple individual tests.
@@ -323,7 +375,7 @@ Orders progress through several states:
    - Cannot be reactivated
    - Set by the client application
 
-::: caution
+:::caution
 
 Important: Once an order becomes `active`, it cannot be modified in the lab's system, even if updated in Medplum.
 

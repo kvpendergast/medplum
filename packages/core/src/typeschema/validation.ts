@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { OperationOutcomeIssue, Resource, StructureDefinition } from '@medplum/fhirtypes';
+import { arrayify } from '../array';
 import { LRUCache } from '../cache';
 import { HTTP_HL7_ORG, UCUM } from '../constants';
 import type { FhirPathAtom } from '../fhirpath/atoms';
@@ -16,7 +17,7 @@ import {
 } from '../outcomes';
 import type { TypedValue } from '../types';
 import { PropertyType, isReference, isResource } from '../types';
-import { append, arrayify, deepEquals, deepIncludes, isEmpty } from '../utils';
+import { EMPTY, append, deepEquals, deepIncludes, isEmpty } from '../utils';
 import type { CrawlerVisitor, TypedValueWithPath } from './crawler';
 import { crawlTypedValue, getNestedProperty } from './crawler';
 import type {
@@ -78,7 +79,6 @@ export function isPrimitiveType(code: string): boolean {
  * See: [FHIR Data Types](https://www.hl7.org/fhir/datatypes.html)
  */
 export const validationRegexes: Record<string, RegExp> = {
-  base64Binary: /^([A-Za-z\d+/]{4})*([A-Za-z\d+/]{2}==|[A-Za-z\d+/]{3}=)?$/,
   canonical: /^\S*$/,
   code: /^[^\s]+( [^\s]+)*$/,
   date: /^(\d(\d(\d[1-9]|[1-9]0)|[1-9]00)|[1-9]000)(-(0[1-9]|1[0-2])(-(0[1-9]|[1-2]\d|3[0-1]))?)?$/,
@@ -112,6 +112,7 @@ export interface ValidatorOptions {
   collect?: {
     tokens?: Record<string, TypedValueWithPath[]>;
   };
+  base64BinaryMaxBytes?: number;
 }
 
 export function validateResource(resource: Resource, options?: ValidatorOptions): OperationOutcomeIssue[] {
@@ -130,6 +131,7 @@ class ResourceValidator implements CrawlerVisitor {
   private readonly root: TypedValue;
   private resourceStack: Resource[];
   private readonly schema: InternalTypeSchema;
+  private readonly base64BinaryMaxBytes: number;
   private readonly collect: ValidatorOptions['collect'];
 
   constructor(typedValue: TypedValue, options?: ValidatorOptions) {
@@ -144,6 +146,7 @@ class ResourceValidator implements CrawlerVisitor {
     } else {
       this.schema = parseStructureDefinition(options.profile);
     }
+    this.base64BinaryMaxBytes = options?.base64BinaryMaxBytes ?? 1 * 1024 * 1024;
     this.collect = options?.collect;
   }
 
@@ -152,7 +155,7 @@ class ResourceValidator implements CrawlerVisitor {
   }
 
   validate(): OperationOutcomeIssue[] {
-    checkObjectForNull(this.root.value as unknown as Record<string, unknown>, this.schema.path, this.issues);
+    checkObjectForNull(this.root.value, this.schema.path, this.issues);
 
     // Check root constraints
     this.constraintsCheck({ ...this.root, path: this.schema.path }, this.schema);
@@ -357,7 +360,7 @@ class ResourceValidator implements CrawlerVisitor {
         choiceOfTypeElements[choiceOfTypeElementName] = key;
         continue;
       }
-      if (!(key in properties) && !(key.startsWith('_') && key.slice(1) in properties)) {
+      if (!(key in properties) && !(key.startsWith('_') && key.slice(1) in properties) && object[key] !== undefined) {
         this.issues.push(createStructureIssue(`${path}.${key}`, `Invalid additional property "${key}"`));
       }
     }
@@ -365,10 +368,7 @@ class ResourceValidator implements CrawlerVisitor {
 
   private constraintsCheck(value: TypedValueWithPath, field: InternalTypeSchema | InternalSchemaElement): void {
     const constraints = field.constraints;
-    if (!constraints) {
-      return;
-    }
-    for (const constraint of constraints) {
+    for (const constraint of constraints ?? EMPTY) {
       if (constraint.severity === 'error' && !(constraint.key in skippedConstraintKeys)) {
         const expression = this.isExpressionTrue(constraint, value);
         if (!expression) {
@@ -471,11 +471,9 @@ class ResourceValidator implements CrawlerVisitor {
         }
       }
     }
-    if (tokens?.length) {
-      for (const token of tokens) {
-        if (token.path === value.path) {
-          return; // Token already exists
-        }
+    for (const token of tokens ?? EMPTY) {
+      if (token.path === value.path) {
+        return; // Token already exists
       }
     }
     this.collect.tokens[url] = append(tokens, value);
@@ -498,7 +496,6 @@ class ResourceValidator implements CrawlerVisitor {
 
     try {
       const evalValues = evalFhirPathTyped(constraint.expression, [value], variables, fhirPathCache);
-
       return evalValues.length === 1 && evalValues[0].value === true;
     } catch (e: any) {
       this.issues.push(
@@ -531,8 +528,11 @@ class ResourceValidator implements CrawlerVisitor {
         }
         return;
       }
+
       // Then, perform additional checks for specialty types
-      if (expectedType === 'string') {
+      if (type === 'base64Binary') {
+        this.validateBase64Binary(value as string, path);
+      } else if (expectedType === 'string') {
         this.validateString(value as string, type, path);
       } else if (expectedType === 'number') {
         this.validateNumber(value as number, type, path);
@@ -540,6 +540,33 @@ class ResourceValidator implements CrawlerVisitor {
     }
     if (extensionElement) {
       crawlTypedValue(extensionElement, this, { schema: getDataType('Element'), initialPath: path });
+    }
+  }
+
+  /**
+   * Validate FHIR base64Binary primitive.
+   * - No generic string checks (whitespace trimming or 1MB limit) apply.
+   * - Validate base64 alphabet and padding.
+   * - Apply an approximate decoded-size limit to guard against pathological payloads.
+   * @param str - The base64-encoded string.
+   * @param path - The FHIR element path for issue reporting.
+   */
+  private validateBase64Binary(str: string, path: string): void {
+    if (!isValidBase64Binary(str)) {
+      this.issues.push(createStructureIssue(path, 'Invalid base64Binary format'));
+      return;
+    }
+
+    // Approximate decoded size: 3/4 of length minus padding
+    let padding = 0;
+    if (str.endsWith('==')) {
+      padding = 2;
+    } else if (str.endsWith('=')) {
+      padding = 1;
+    }
+    const approxBytes = Math.max(0, Math.floor((str.length * 3) / 4) - padding);
+    if (approxBytes > this.base64BinaryMaxBytes) {
+      this.issues.push(createStructureIssue(path, `base64Binary exceeds ${this.base64BinaryMaxBytes} bytes`));
     }
   }
 
@@ -705,12 +732,9 @@ export function matchDiscriminant(
 }
 
 function checkSliceElement(value: TypedValue, slicingRules: SlicingRules | undefined): string | undefined {
-  if (!slicingRules) {
-    return undefined;
-  }
-  for (const slice of slicingRules.slices) {
+  for (const slice of slicingRules?.slices ?? EMPTY) {
     if (
-      slicingRules.discriminator.every((discriminator) =>
+      slicingRules?.discriminator?.every((discriminator) =>
         arrayify(getNestedProperty(value, discriminator.path))?.some((v) => matchDiscriminant(v, discriminator, slice))
       )
     ) {
@@ -755,4 +779,28 @@ function isTerminologyType(type: string): boolean {
     default:
       return false;
   }
+}
+
+function isValidBase64Binary(str: string): boolean {
+  // validates FHIR base64Binary format without regex backtracking to avoid catastrophic backtracking
+  if (str.length === 0) {
+    return false;
+  }
+  let padding = 0;
+  if (str.endsWith('==')) {
+    padding = 2;
+  } else if (str.endsWith('=')) {
+    padding = 1;
+  }
+
+  const dataLen = str.length - padding;
+  if (dataLen < 0) {
+    return false;
+  }
+  // add padding to dataLen instead of using str.length to check for invalid padding like ===
+  if ((padding + dataLen) % 4 !== 0) {
+    return false;
+  }
+  const dataPart = padding > 0 ? str.slice(0, -padding) : str;
+  return /^[A-Za-z\d+/]+$/.test(dataPart);
 }

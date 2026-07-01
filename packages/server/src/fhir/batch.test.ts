@@ -24,7 +24,7 @@ import { RateLimiterRedis } from 'rate-limiter-flexible';
 import request from 'supertest';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
-import { runInAsyncContext } from '../context';
+import { runInAuthenticatedContext } from '../context';
 import { createTestProject, initTestAuth, waitForAsyncJob } from '../test.setup';
 import type { BatchJobData } from '../workers/batch';
 import { execBatchJob, getBatchQueue } from '../workers/batch';
@@ -40,7 +40,7 @@ describe('Batch and Transaction processing', () => {
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   afterAll(async () => {
@@ -1514,6 +1514,7 @@ describe('Batch and Transaction processing', () => {
       .post(`/fhir/R4/`)
       .set('Authorization', 'Bearer ' + accessToken)
       .set('Content-Type', ContentType.FHIR_JSON)
+      .set('X-Medplum', 'extended')
       .set('Prefer', 'respond-async')
       .send(batch);
     expect(res.status).toBe(202);
@@ -1530,7 +1531,7 @@ describe('Batch and Transaction processing', () => {
     queue.add.mockClear();
 
     let count = 0;
-    const consumeMock = jest.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async (key, _points) => {
+    const consumeMock = vi.spyOn(RateLimiterRedis.prototype, 'consume').mockImplementation(async (key, _points) => {
       count = (count + 1) % 3;
       if (!key.toString().includes(membership.id)) {
         // allowed
@@ -1550,22 +1551,23 @@ describe('Batch and Transaction processing', () => {
       } as RateLimiterRes;
     });
 
-    const jobResult = runInAsyncContext(
+    const jobResult = runInAuthenticatedContext(
       { login, membership, project, userConfig: {} as unknown as UserConfiguration },
       undefined,
       undefined,
+      { async: true },
       () => execBatchJob(job)
     );
 
     // Must wait here, but `RateLimiterRedis` uses TTL time from Redis `PTTL` command
 
     await expect(jobResult).resolves.toBe(undefined);
-    expect(consumeMock).toHaveBeenCalledTimes(10);
+    // Rate limits should not actually be consumed
+    expect(consumeMock).toHaveBeenCalledTimes(0);
 
     const jobUrl = outcome.issue[0].diagnostics as string;
     const asyncJob = await waitForAsyncJob(jobUrl, app, accessToken);
-
-    await waitForAsyncJob(res.header['content-location'], app, accessToken);
+    expect(asyncJob.meta?.project).toStrictEqual(project.id);
 
     expect(asyncJob.output).toMatchObject<Parameters>({
       resourceType: 'Parameters',

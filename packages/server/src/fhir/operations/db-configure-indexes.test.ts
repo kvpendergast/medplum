@@ -9,7 +9,7 @@ import { loadTestConfig } from '../../config/loader';
 import { DatabaseMode, getDatabasePool } from '../../database';
 import { initTestAuth, waitForAsyncJob } from '../../test.setup';
 
-describe('dbgetginindexes', () => {
+describe('db-configure-indexes', () => {
   const app = express();
 
   let accessToken: string;
@@ -156,7 +156,7 @@ describe('dbgetginindexes', () => {
 
     expect(asyncJob.output).toStrictEqual({
       resourceType: 'Parameters',
-      parameter: [
+      parameter: expect.toEqualUnordered([
         {
           name: 'action',
           part: [
@@ -177,7 +177,7 @@ describe('dbgetginindexes', () => {
             },
           ],
         },
-      ],
+      ]),
     });
   });
 
@@ -214,7 +214,7 @@ describe('dbgetginindexes', () => {
 
     expect(asyncJob.output).toStrictEqual({
       resourceType: 'Parameters',
-      parameter: [
+      parameter: expect.toEqualUnordered([
         {
           name: 'action',
           part: [
@@ -264,7 +264,7 @@ describe('dbgetginindexes', () => {
             },
           ],
         },
-      ],
+      ]),
     });
   });
 

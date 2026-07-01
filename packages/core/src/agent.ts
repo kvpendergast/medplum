@@ -2,6 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { LogMessage } from './logger';
 
+export const ReturnAckCategory = {
+  /** The first ACK message received is the one returned */
+  FIRST: 'first',
+  /** Only return upon receiving a positive application-level ACK (AA, AE, or AR), or if a commit-level error occurred */
+  APPLICATION: 'application',
+} as const;
+export type ReturnAckCategory = (typeof ReturnAckCategory)[keyof typeof ReturnAckCategory];
+
 export interface BaseAgentMessage {
   type: string;
   callback?: string;
@@ -40,6 +48,7 @@ export interface AgentTransmitRequest extends BaseAgentRequestMessage {
   remote: string;
   contentType: string;
   body: string;
+  returnAck?: ReturnAckCategory;
 }
 
 export interface AgentTransmitResponse extends BaseAgentMessage {
@@ -82,13 +91,64 @@ export interface AgentLogsResponse extends BaseAgentMessage {
   logs: LogMessage[];
 }
 
+export type AgentRttStats = {
+  count: number;
+  min: number;
+  max: number;
+  average: number;
+  p50: number;
+  p95: number;
+  p99: number;
+  pendingCount: number;
+};
+
+export type AgentChannelStats = {
+  rtt: AgentRttStats;
+};
+
+export type AgentStatPrimitiveValue = string | boolean | number;
+export type AgentStatValue =
+  | AgentStatPrimitiveValue
+  | Record<
+      string,
+      AgentStatPrimitiveValue | Record<string, AgentStatPrimitiveValue | Record<string, AgentStatPrimitiveValue>>
+    >;
+
+/**
+ * Statistics about the running agent. Known fields are typed; additional
+ * fields may be present and are preserved as unknown values.
+ */
+export interface AgentStats {
+  hl7ConnectionsOpen: number;
+  ping: number;
+  webSocketQueueDepth: number;
+  hl7QueueDepth: number;
+  hl7ClientCount: number;
+  live: boolean;
+  outstandingHeartbeats: number;
+  channelStats: Record<string, AgentChannelStats>;
+  clientStats: Record<string, AgentChannelStats>;
+  [key: string]: AgentStatValue;
+}
+
+export interface AgentStatsRequest extends BaseAgentRequestMessage {
+  type: 'agent:stats:request';
+}
+
+export interface AgentStatsResponse extends BaseAgentMessage {
+  type: 'agent:stats:response';
+  statusCode: number;
+  stats: AgentStats;
+}
+
 export type AgentRequestMessage =
   | AgentConnectRequest
   | AgentHeartbeatRequest
   | AgentTransmitRequest
   | AgentReloadConfigRequest
   | AgentUpgradeRequest
-  | AgentLogsRequest;
+  | AgentLogsRequest
+  | AgentStatsRequest;
 
 export type AgentResponseMessage =
   | AgentConnectResponse
@@ -97,6 +157,7 @@ export type AgentResponseMessage =
   | AgentReloadConfigResponse
   | AgentUpgradeResponse
   | AgentLogsResponse
+  | AgentStatsResponse
   | AgentError;
 
 export type AgentMessage = AgentRequestMessage | AgentResponseMessage;

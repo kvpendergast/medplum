@@ -69,7 +69,7 @@ describe('ColumnStatistics', () => {
   };
 
   beforeEach(() => {
-    const fetch = jest.fn(async (url: string, options?: { method?: string }) => {
+    const fetch = vi.fn(async (url: string, options?: { method?: string }) => {
       let status: number | undefined;
       let body: any;
 
@@ -100,22 +100,22 @@ describe('ColumnStatistics', () => {
             return { 'content-type': ContentType.FHIR_JSON }[name];
           },
         },
-        json: jest.fn(async () => body),
+        json: vi.fn(async () => body),
       };
     });
 
     medplum = new MedplumClient({ fetch });
-    jest.useFakeTimers();
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
   });
 
   afterEach(async () => {
     await act(async () => notifications.clean());
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      await vi.runOnlyPendingTimersAsync();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders and loads column statistics', async () => {
@@ -125,7 +125,7 @@ describe('ColumnStatistics', () => {
     expect(screen.getByText('Statistics Target:')).toBeInTheDocument();
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     expect(screen.getByText('Column')).toBeInTheDocument();
@@ -135,7 +135,7 @@ describe('ColumnStatistics', () => {
   test('Selects table and displays column data', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -146,7 +146,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -165,7 +165,7 @@ describe('ColumnStatistics', () => {
   test('Select all and deselect all columns', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -176,7 +176,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -206,7 +206,7 @@ describe('ColumnStatistics', () => {
   test('Select individual row', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -217,7 +217,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -245,7 +245,7 @@ describe('ColumnStatistics', () => {
   });
 
   test('Returns early when submitting without table selected', async () => {
-    const noTableFetch = jest.fn(async (url: string, options?: { method?: string }) => {
+    const noTableFetch = vi.fn(async (url: string, options?: { method?: string }) => {
       if (url.includes('ValueSet/$expand')) {
         return {
           status: 200,
@@ -273,12 +273,12 @@ describe('ColumnStatistics', () => {
     });
 
     medplum = new MedplumClient({ fetch: noTableFetch });
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
 
     setup();
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     // Check reset to default to make form submission valid
@@ -292,7 +292,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     // Form submission returns early (no table selected), no API call made
@@ -303,7 +303,7 @@ describe('ColumnStatistics', () => {
   test('Shows notification when submitting without selecting columns', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -314,7 +314,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -337,7 +337,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await waitFor(() => {
@@ -348,7 +348,7 @@ describe('ColumnStatistics', () => {
   test('Submits form with selected columns and new statistics target', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -359,7 +359,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -391,7 +391,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await waitFor(() => {
@@ -402,7 +402,7 @@ describe('ColumnStatistics', () => {
   test('Submits form with reset to default', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -413,7 +413,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -443,7 +443,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await waitFor(() => {
@@ -454,7 +454,7 @@ describe('ColumnStatistics', () => {
   test('Toggles show more stats', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -465,7 +465,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -489,7 +489,7 @@ describe('ColumnStatistics', () => {
   test('Toggles show non-default only', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -500,7 +500,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -523,7 +523,7 @@ describe('ColumnStatistics', () => {
   test('Opens modal when clicking stat cell', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -534,7 +534,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -560,7 +560,7 @@ describe('ColumnStatistics', () => {
     setup();
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await act(async () => {
@@ -568,12 +568,12 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
   });
 
   test('Handles API error on column statistics fetch', async () => {
-    const errorFetch = jest.fn(async (url: string) => {
+    const errorFetch = vi.fn(async (url: string) => {
       if (url.includes('ValueSet/$expand')) {
         return {
           status: 200,
@@ -593,12 +593,12 @@ describe('ColumnStatistics', () => {
     });
 
     medplum = new MedplumClient({ fetch: errorFetch });
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
 
     setup();
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await waitFor(() => {
@@ -607,7 +607,7 @@ describe('ColumnStatistics', () => {
   });
 
   test('Handles configure column statistics API error', async () => {
-    const errorFetch = jest.fn(async (url: string, options?: { method?: string }) => {
+    const errorFetch = vi.fn(async (url: string, options?: { method?: string }) => {
       if (url.includes('ValueSet/$expand')) {
         return {
           status: 200,
@@ -635,11 +635,11 @@ describe('ColumnStatistics', () => {
     });
 
     medplum = new MedplumClient({ fetch: errorFetch });
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
 
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -650,7 +650,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -680,7 +680,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     await waitFor(() => {
@@ -689,7 +689,7 @@ describe('ColumnStatistics', () => {
   });
 
   test('Handles empty column stats response', async () => {
-    const emptyFetch = jest.fn(async (url: string) => {
+    const emptyFetch = vi.fn(async (url: string) => {
       if (url.includes('ValueSet/$expand')) {
         return {
           status: 200,
@@ -715,19 +715,19 @@ describe('ColumnStatistics', () => {
     });
 
     medplum = new MedplumClient({ fetch: emptyFetch });
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
 
     setup();
 
     await act(async () => {
-      jest.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
     });
 
     expect(screen.getByText('Statistics Target:')).toBeInTheDocument();
   });
 
   test('Truncates long string values', async () => {
-    const longValueFetch = jest.fn(async (url: string) => {
+    const longValueFetch = vi.fn(async (url: string) => {
       if (url.includes('ValueSet/$expand')) {
         return {
           status: 200,
@@ -779,11 +779,11 @@ describe('ColumnStatistics', () => {
     });
 
     medplum = new MedplumClient({ fetch: longValueFetch });
-    jest.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
+    vi.spyOn(medplum, 'isSuperAdmin').mockImplementation(() => true);
 
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -794,7 +794,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -818,7 +818,7 @@ describe('ColumnStatistics', () => {
   test('Shows statistics target -1 as default', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -829,7 +829,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -849,7 +849,7 @@ describe('ColumnStatistics', () => {
   test('Show non-default with show more stats enabled', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -860,7 +860,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -890,7 +890,7 @@ describe('ColumnStatistics', () => {
   test('Table change clears selected rows', async () => {
     setup();
 
-    const input = screen.getByPlaceholderText('Table name') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Table name');
 
     await act(async () => {
       fireEvent.click(input);
@@ -901,7 +901,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {
@@ -930,7 +930,7 @@ describe('ColumnStatistics', () => {
     });
 
     await act(async () => {
-      jest.advanceTimersByTime(1000);
+      await vi.advanceTimersByTimeAsync(1000);
     });
 
     await act(async () => {

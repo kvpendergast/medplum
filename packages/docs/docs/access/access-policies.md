@@ -66,7 +66,7 @@ See the [Search documentation](/docs/search/basic-search) for more information o
 }
 ```
 
-:::warning Limitations
+:::warning[Limitations]
 While Medplum `AccessPolicies` use the [FHIR search syntax](/docs/search), it does not implement the full search specification. Specifically, the `criteria` syntax has the following limitations:
 
 - Only `:not` and `:missing` [modifiers](/docs/search/basic-search#search-modifiers) are allowed.
@@ -144,7 +144,7 @@ The `interaction` array can contain any of the supported interaction types:
 - `history`: View the list of previous versions of a resource
 - `vread`: View a specific previous version of a resource
 
-:::tip Related interactions
+:::tip[Related interactions]
 
 Some FHIR interactions are used in concert by the server, and so should be considered together:
 
@@ -209,7 +209,7 @@ The following access policy grants read-only access to the "Patient" resource ty
 
 Constraints on writes to a resource can also be specified using [FHIRPath expressions][fhirpath] in the `AccessPolicy.resource.writeConstraint` field. These expressions may contain the special variable `%before` to refer to the resource as it existed before the write. Any property accesses will by default refer to the resource as it exists with updates applied, but the `%after` variable is also provided for convenience.
 
-:::tip
+:::tip[]
 
 In case of a resource being created, `%before` will be undefined, so any expressions that refer to `%before` must account for this case. To select only updates or only creates, prefix the criteria with `%before.exists() implies` or `%before.exists().not() implies` respectively.
 
@@ -375,6 +375,104 @@ See this [video demo](https://www.youtube.com/watch?v=IDhsWiIxK3o) for an illust
 
 See [this Github Discussion](https://github.com/medplum/medplum/discussions/1453) for more examples of access scenarios that can be created using these policies.
 
+Parameterized policies are also the recommended pattern for temporary operational access, such as emergency patient access or temporary tenant access.
+
+### Emergency Access
+
+Emergency access, sometimes called Break Glass access, is a controlled workflow for granting temporary access to protected health information when normal access paths are not sufficient. This pattern supports ONC criterion [d6 Emergency Access](/docs/compliance/onc#criteria-certified).
+
+When implementing emergency access, keep the grant narrow, time-bound, and auditable:
+
+- Require an explicit reason before access is granted.
+- Scope access to the smallest useful resource set, such as one patient or one tenant.
+- Prefer short-lived sessions or a temporary `ProjectMembership` entry instead of standing broad access.
+- Record who requested access, who approved it, the reason, the patient or tenant scope, and the revocation time.
+- Review `AuditEvent` records after the access window closes.
+
+For patient-specific escalation, one pattern is to add the support user or clinician's `Practitioner` profile to the patient's `generalPractitioner` list, then use an access policy scoped to that relationship:
+
+```json
+{
+  "resourceType": "AccessPolicy",
+  "name": "Emergency Patient Access",
+  "resource": [
+    {
+      "resourceType": "Patient",
+      "criteria": "Patient?general-practitioner=%profile"
+    }
+  ]
+}
+```
+
+After the emergency window, remove the temporary `generalPractitioner` reference and confirm that the user can no longer read the patient record.
+
+### Temporary tenant access
+
+For support workflows, use a parameterized policy to grant access to one tenant for a limited operational window. Add a temporary `ProjectMembership.access` entry with the tenant reference as the parameter value, capture the reason and approval in your support system, and remove the entry when the work is complete.
+
+```json
+{
+  "resourceType": "ProjectMembership",
+  "access": [
+    {
+      "policy": { "reference": "AccessPolicy/tenant-support-readonly" },
+      "parameter": [
+        {
+          "name": "organization",
+          "valueReference": { "reference": "Organization/clinic-a" }
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Migrating from top-level compartments
+
+Older access policies may use the top-level `compartment` element to describe a broad compartment rule. For new policies, prefer resource-level `criteria` with parameterized values. This keeps each resource rule explicit and lets the same policy template be reused with different `ProjectMembership.access.parameter` values.
+
+For example, instead of relying on a top-level compartment rule, define the tenant filter on each resource that should be visible:
+
+```json
+{
+  "resourceType": "AccessPolicy",
+  "name": "Organization Tenant Access",
+  "resource": [
+    {
+      "resourceType": "Patient",
+      "criteria": "Patient?_compartment=%organization"
+    },
+    {
+      "resourceType": "Observation",
+      "criteria": "Observation?_compartment=%organization"
+    },
+    {
+      "resourceType": "DiagnosticReport",
+      "criteria": "DiagnosticReport?_compartment=%organization"
+    }
+  ]
+}
+```
+
+Then set the concrete tenant value on each membership:
+
+```json
+{
+  "resourceType": "ProjectMembership",
+  "access": [
+    {
+      "policy": { "reference": "AccessPolicy/organization-tenant-access" },
+      "parameter": [
+        {
+          "name": "organization",
+          "valueReference": { "reference": "Organization/clinic-a" }
+        }
+      ]
+    }
+  ]
+}
+```
+
 ## Example Access Policies
 
 ### Healthcare Partnerships
@@ -399,7 +497,7 @@ This access policy grants read-only access to all Patients that are within that 
 {
   "resourceType": "AccessPolicy",
   "name": "Patient Example",
-  // Any resource created or updated will be tagged with `meta.account` set to `Organization/abc-123`
+  // Any resource created will be tagged with `meta.account` set to `Organization/abc-123`
   "compartment": {
     "reference": "Organization/abc-123",
     "display": "Example Customer Organization"
@@ -446,13 +544,13 @@ Because the account-tagging is handled within the resource, project administrato
 
 If you are building a patient-facing application (such as [FooMedical](https://github.com/medplum/foomedical)), a common requirement is to restrict each patient's access to only their own data. In this case it is recommended to use templated access policies, that also implement compartments as shown below.
 
-:::caution Open Patient Registration
+:::caution[Open Patient Registration]
 
 Patient Access is disabled by default. See our article on [enabling open patient registration](/docs/user-management/open-patient-registration) for instructions on enabling this functionality.
 
 :::
 
-:::danger Binary Access
+:::danger[Binary Access]
 
 Binary resources cannot use compartment-based access controls. They require explicit `securityContext` declaration. See the [Binary Security Context](/docs/access/binary-security-context) documentation for more information.
 
@@ -463,9 +561,6 @@ Binary resources cannot use compartment-based access controls. They require expl
   "resourceType": "AccessPolicy",
   "name": "Patient Access Policy Template",
   "id": "patient-access-policy-template",
-  "compartment": {
-    "reference": "%patient"
-  },
   "resource": [
     {
       "resourceType": "Patient",
@@ -501,7 +596,28 @@ Binary resources cannot use compartment-based access controls. They require expl
     },
     {
       "resourceType": "Communication",
-      "criteria": "Communication?_compartment=%patient"
+      "criteria": "Communication?_compartment=%patient",
+      "interaction": ["create", "read", "search"]
+    },
+    {
+      "resourceType": "RequestGroup",
+      "criteria": "RequestGroup?_compartment=%patient"
+    },
+    {
+      "resourceType": "Task",
+      "criteria": "Task?focus=%patient"
+    },
+    {
+      "resourceType": "QuestionnaireResponse",
+      "criteria": "QuestionnaireResponse?_compartment=%patient"
+    },
+    {
+      "resourceType": "Subscription",
+      "criteria": "Subscription?type=websocket&author=%profile"
+    },
+    {
+      "resourceType": "HealthcareService",
+      "readonly": true
     },
     {
       "resourceType": "Organization",
@@ -516,15 +632,43 @@ Binary resources cannot use compartment-based access controls. They require expl
       "readonly": true
     },
     {
-      "resourceType": "Slot",
-      "readonly": true
+      "resourceType": "DocumentReference",
+      "criteria": "DocumentReference?_compartment=%patient"
     },
     {
-      "resourceType": "Binary"
+      "resourceType": "Subscription",
+      "criteria": "Subscription?type=websocket&author=%patient"
+    },
+    {
+      "resourceType": "Appointment",
+      "interaction": ["create", "read", "search"],
+      "criteria": "Appointment?_compartment=%patient"
+    },
+    {
+      "resourceType": "Slot",
+      "interaction": ["create", "read", "search"]
     }
   ]
 }
 ```
+
+:::caution[Binary Security Context]
+
+`Binary` resources cannot use compartment-based access controls. Access is restricted by matching the `securityContext` field to the patient. When creating a `Binary` in a patient context, always set `securityContext` to the patient reference — otherwise the patient will not be able to access it:
+
+```json
+{
+  "resourceType": "Binary",
+  "contentType": "application/pdf",
+  "securityContext": {
+    "reference": "Patient/homer-simpson"
+  }
+}
+```
+
+See [Binary Security Context](/docs/access/binary-security-context) for more details.
+
+:::
 
 You can configure your project to support open registration for patients, therefore it is crucial that you setup a Default Access Policy similar to the one above.
 
@@ -560,6 +704,36 @@ The [patient access policy](#patient-access) above can be combined with [policy 
 }
 ```
 
+### WebSocket Subscriptions (`useSubscription` Hook)
+
+To use the [`useSubscription`](/docs/react/use-subscription) hook, users need two things in their access policy:
+
+1. **Permission to create `Subscription` resources** — The hook creates an in-memory `Subscription` on behalf of the user. Use a criteria scoped to websocket subscriptions owned by the current user so that users can only manage their own subscriptions:
+
+   ```
+   Subscription?type=websocket&author=%profile
+   ```
+
+2. **Read access to each subscribed resource type** — Users must also have `read` access for every resource type they intend to subscribe to. For example, if your app calls `useSubscription('Communication?...')`, the policy must grant at least `read` on `Communication`.
+
+```json
+{
+  "resourceType": "AccessPolicy",
+  "name": "WebSocket Subscription Policy",
+  "resource": [
+    {
+      "resourceType": "Subscription",
+      "criteria": "Subscription?type=websocket&author=%profile"
+    },
+    {
+      "resourceType": "Communication"
+    }
+  ]
+}
+```
+
+Add one entry per resource type your application subscribes to.
+
 ### Streamlined linkage and RBAC Control with AccessPolicy.basedOn
 
 In Medplum, users can attach one or more parameterized AccessPolicy resources to their ProjectMembership. During runtime, the Medplum server consolidates these resources into a single enforceable AccessPolicy.  
@@ -568,11 +742,9 @@ The recent enhancements introduce the **AccessPolicy.basedOn element**, which en
 This update allows for more granular control and visibility in RBAC implementations, where users have varying access levels based on their group or policy.
 
 - **Endpoint: /auth/me**
-
   - This endpoint provides access to the user's AccessPolicy information, including the basedOn element.
 
 - **AccessPolicy.basedOn**
-
   - This element is an array containing references to original AccessPolicy resources.
   - It provides traceability by linking the resolved AccessPolicy back to its source policies.
   - At runtime, Medplum resolves all nested and parameterized policies to build the basedOn array.

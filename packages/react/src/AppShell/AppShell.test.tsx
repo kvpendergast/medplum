@@ -4,13 +4,14 @@ import { MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react-hooks';
 import { MemoryRouter } from 'react-router';
 import { Logo } from '../Logo/Logo';
-import { act, fireEvent, render, screen } from '../test-utils/render';
+import { act, fireEvent, render, screen, selectAutocompleteOption } from '../test-utils/render';
+import type { AppShellAnnouncement } from './AnnouncementBanners';
 import { AppShell } from './AppShell';
 
 const medplum = new MockClient();
-const navigateMock = jest.fn();
+const navigateMock = vi.fn();
 
-async function setup(layoutVersion: 'v1' | 'v2' = 'v1'): Promise<void> {
+async function setup(layoutVersion: 'v1' | 'v2' = 'v1', announcements?: AppShellAnnouncement[]): Promise<void> {
   // Reset localStorage before each test
   localStorage.clear();
 
@@ -22,6 +23,7 @@ async function setup(layoutVersion: 'v1' | 'v2' = 'v1'): Promise<void> {
             logo={<Logo size={24} />}
             version="test.version"
             layoutVersion={layoutVersion}
+            announcements={announcements}
             menus={[
               {
                 title: 'Menu 1',
@@ -51,15 +53,15 @@ async function setup(layoutVersion: 'v1' | 'v2' = 'v1'): Promise<void> {
 
 describe('AppShell v1', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     navigateMock.mockClear();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      vi.runOnlyPendingTimers();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders', async () => {
@@ -96,47 +98,46 @@ describe('AppShell v1', () => {
       fireEvent.click(screen.getByTitle('Medplum Logo'));
     });
 
-    const input = screen.getByPlaceholderText('Resource Type') as HTMLInputElement;
+    const input = screen.getByPlaceholderText('Resource Type');
 
-    // Enter random text
     await act(async () => {
       fireEvent.change(input, { target: { value: 'Different' } });
     });
 
+    await selectAutocompleteOption(input, 'Test');
+  });
+
+  test('Dismissible announcement', async () => {
+    await setup('v1', [
+      {
+        id: 'maintenance',
+        message: 'Expected system maintenance tonight',
+        dismissible: true,
+      },
+    ]);
+
+    expect(screen.getByText('Expected system maintenance tonight')).toBeInTheDocument();
+
     await act(async () => {
-      fireEvent.change(input, { target: { value: 'Test' } });
+      fireEvent.click(screen.getByLabelText('Dismiss announcement'));
     });
 
-    // Wait for the drop down
-    await act(async () => {
-      jest.advanceTimersByTime(1000);
-    });
-
-    // Press the down arrow
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'ArrowDown', code: 'ArrowDown' });
-    });
-
-    // Press "Enter"
-    await act(async () => {
-      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
-    });
-
-    expect(navigateMock).toHaveBeenCalledWith('/test-code');
+    expect(screen.queryByText('Expected system maintenance tonight')).not.toBeInTheDocument();
+    expect(localStorage['appShellDismissedAnnouncements']).toBe(JSON.stringify(['maintenance']));
   });
 });
 
 describe('AppShell v2', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
     navigateMock.mockClear();
   });
 
   afterEach(async () => {
     await act(async () => {
-      jest.runOnlyPendingTimers();
+      vi.runOnlyPendingTimers();
     });
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   test('Renders v2', async () => {
@@ -145,42 +146,58 @@ describe('AppShell v2', () => {
     expect(screen.getByText('Your application here')).toBeInTheDocument();
   });
 
-  test('Toggle sidebar v2', async () => {
+  test('Toggle sidebar v2 via logo', async () => {
     await setup('v2');
     expect(screen.getByText('Your application here')).toBeInTheDocument();
 
+    const logoButton = screen.getByRole('button', { name: 'Medplum Logo' });
+    const menuTitle = screen.getByText('Menu 1');
+
+    expect(logoButton).toHaveAttribute('aria-expanded', 'false');
+    expect(menuTitle.getAttribute('data-opened')).toBeNull();
+
     // Click on the logo to open the menu
     await act(async () => {
-      fireEvent.click(screen.getByTitle('Medplum Logo'));
+      fireEvent.click(logoButton);
     });
 
-    expect(screen.getByText('Menu 1')).toBeInTheDocument();
+    expect(logoButton).toHaveAttribute('aria-expanded', 'true');
+    expect(menuTitle.getAttribute('data-opened')).toBe('true');
 
     // Click on the logo to close the menu
     await act(async () => {
-      fireEvent.click(screen.getByTitle('Medplum Logo'));
+      fireEvent.click(logoButton);
     });
 
-    expect(screen.queryByText('Menu 1')).not.toBeInTheDocument();
+    expect(logoButton).toHaveAttribute('aria-expanded', 'false');
+    expect(menuTitle.getAttribute('data-opened')).toBeNull();
   });
 
-  test('Toggle sidebar v2', async () => {
+  test('Toggle sidebar v2 via toggle button', async () => {
     await setup('v2');
     expect(screen.getByText('Your application here')).toBeInTheDocument();
 
-    // Click on the logo to open the menu
+    const toggleButton = screen.getByLabelText('Open Sidebar');
+    const menuTitle = screen.getByText('Menu 1');
+
+    expect(toggleButton).toHaveAttribute('aria-expanded', 'false');
+    expect(menuTitle.getAttribute('data-opened')).toBeNull();
+
+    // Click on the toggle button to open the menu
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Toggle navbar' }));
+      fireEvent.click(toggleButton);
     });
 
-    expect(screen.getByText('Menu 1')).toBeInTheDocument();
+    expect(screen.getByLabelText('Close Sidebar')).toHaveAttribute('aria-expanded', 'true');
+    expect(menuTitle.getAttribute('data-opened')).toBe('true');
 
-    // Click on the logo to close the menu
+    // Click again to close the menu
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: 'Toggle navbar' }));
+      fireEvent.click(screen.getByLabelText('Close Sidebar'));
     });
 
-    expect(screen.queryByText('Menu 1')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Open Sidebar')).toHaveAttribute('aria-expanded', 'false');
+    expect(menuTitle.getAttribute('data-opened')).toBeNull();
   });
 
   test('Spotlight search', async () => {
@@ -190,30 +207,30 @@ describe('AppShell v2', () => {
       fireEvent.click(screen.getByTitle('Medplum Logo'));
     });
 
-    const searchButton = screen.getByText('Search') as HTMLInputElement;
+    const searchButton = screen.getByText('Search');
 
     await act(async () => {
       fireEvent.click(searchButton);
     });
 
-    const input = (await screen.findByPlaceholderText('Search...')) as HTMLInputElement;
+    const input = await screen.findByPlaceholderText(/Start typing to search/i);
 
-    // Expect the initial "not found" message:
-    expect(screen.getByText('Type to search...')).toBeInTheDocument();
+    // Expect the initial keyboard shortcut hint when nothing is in recent history
+    expect(screen.getByText(/open Search next time/i)).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.change(input, { target: { value: 'jibberish' } });
     });
 
     // Expect the "No results found" message:
-    expect(screen.getByText('No results found')).toBeInTheDocument();
+    expect(await screen.findByText('No results found')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.change(input, { target: { value: '' } });
     });
 
-    // Back to the initial "not found" message:
-    expect(screen.getByText('Type to search...')).toBeInTheDocument();
+    // Back to the initial keyboard shortcut hint:
+    expect(await screen.findByText(/open Search next time/i)).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.change(input, { target: { value: 'Homer' } });
@@ -231,5 +248,18 @@ describe('AppShell v2', () => {
     });
 
     expect(navigateMock).toHaveBeenCalledWith('/Patient/123');
+  });
+
+  test('Persistent announcement', async () => {
+    await setup('v2', [
+      {
+        message: 'Warning: logged in as super admin',
+        color: 'red',
+        role: 'alert',
+      },
+    ]);
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Warning: logged in as super admin');
+    expect(screen.queryByLabelText('Dismiss announcement')).not.toBeInTheDocument();
   });
 });

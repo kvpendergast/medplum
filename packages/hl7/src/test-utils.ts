@@ -1,14 +1,15 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import { EventEmitter } from 'node:events';
+import { createServer } from 'node:net';
 import { Duplex } from 'node:stream';
 
 export class MockSocket extends Duplex {
   destroyed = false;
   closed = false;
   handlers: Record<string, () => void> = {};
-  setEncoding = jest.fn();
-  setTimeout = jest.fn();
+  setEncoding = vi.fn() as (encoding?: BufferEncoding) => this;
+  setTimeout = vi.fn() as (timeout: number, callback?: () => void) => this;
 
   on(event: unknown, listener: unknown): this {
     this.handlers[event as string] = listener as () => void;
@@ -36,7 +37,7 @@ export class MockSocket extends Duplex {
     return this.close();
   }
 
-  write = jest.fn((chunk) => {
+  write = vi.fn((chunk) => {
     this.emit('mockWrite', chunk);
   }) as any;
 }
@@ -44,10 +45,13 @@ export class MockSocket extends Duplex {
 export class MockServer extends EventEmitter {
   private closed = false;
   private sockets = new Set<MockSocket>();
-  listen = jest.fn((_port, callback) => {
+  private boundPort = 0;
+  listen = vi.fn((port, callback) => {
+    this.boundPort = port;
     callback();
   });
-  close = jest.fn((callback: (err?: Error) => void) => {
+  address = vi.fn(() => ({ port: this.boundPort }));
+  close = vi.fn((callback: (err?: Error) => void) => {
     if (!this.closed) {
       this.closed = true;
       for (const socket of this.sockets) {
@@ -74,4 +78,24 @@ export class MockServer extends EventEmitter {
       this.sockets.add(serverSocket);
     }
   }
+}
+
+// Used only for tests that need a free port number with *nothing* listening on it.
+// For tests that start an Hl7Server, prefer `server.start(0)` which returns the OS-assigned
+// port and never has a release-then-rebind window.
+export async function getFreePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.listen(0, () => {
+      const { port } = server.address() as { port: number };
+      server.close((err) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(port);
+        }
+      });
+    });
+    server.on('error', reject);
+  });
 }

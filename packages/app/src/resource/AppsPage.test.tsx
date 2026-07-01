@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import { MantineProvider } from '@mantine/core';
 import { Notifications } from '@mantine/notifications';
-import { forbidden, locationUtils, OperationOutcomeError } from '@medplum/core';
+import { forbidden, OperationOutcomeError } from '@medplum/core';
 import { MockClient } from '@medplum/mock';
 import { ErrorBoundary, Loading, MedplumProvider } from '@medplum/react';
 import { Suspense } from 'react';
 import { MemoryRouter } from 'react-router';
 import { AppRoutes } from '../AppRoutes';
-import { act, fireEvent, render, screen } from '../test-utils/render';
+import { act, fireEvent, render, screen, waitFor } from '../test-utils/render';
 
 describe('AppsPage', () => {
   async function setup(url: string, medplum = new MockClient()): Promise<void> {
@@ -42,7 +42,8 @@ describe('AppsPage', () => {
   });
 
   test('Patient Smart App Launch', async () => {
-    locationUtils.assign = jest.fn();
+    const mockOpen = vi.fn();
+    window.open = mockOpen;
 
     await setup('/Patient/123/apps');
     expect(await screen.findByText('Apps')).toBeInTheDocument();
@@ -53,11 +54,14 @@ describe('AppsPage', () => {
       fireEvent.click(screen.getByText('Inferno Client'));
     });
 
-    expect(locationUtils.assign).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockOpen).toHaveBeenCalledWith(expect.stringContaining('launch='), '_blank');
+    });
   });
 
   test('Encounter Smart App Launch', async () => {
-    locationUtils.assign = jest.fn();
+    const mockOpen = vi.fn();
+    window.open = mockOpen;
 
     await setup('/Encounter/123/apps');
     expect(await screen.findByText('Apps')).toBeInTheDocument();
@@ -68,13 +72,15 @@ describe('AppsPage', () => {
       fireEvent.click(screen.getByText('Inferno Client'));
     });
 
-    expect(locationUtils.assign).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mockOpen).toHaveBeenCalledWith(expect.stringContaining('launch='), '_blank');
+    });
   });
 
   test('Access denied to ClientApplications', async () => {
     const medplum = new MockClient();
     (medplum as any).originalSearchResources = medplum.searchResources;
-    medplum.searchResources = jest.fn().mockImplementation(async (resourceType, query) => {
+    medplum.searchResources = vi.fn().mockImplementation(async (resourceType, query) => {
       if (resourceType === 'ClientApplication') {
         throw new OperationOutcomeError(forbidden);
       }

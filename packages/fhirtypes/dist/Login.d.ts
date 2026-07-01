@@ -5,18 +5,18 @@
  * Do not edit manually.
  */
 
-import { Bot } from './Bot';
-import { ClientApplication } from './ClientApplication';
-import { Extension } from './Extension';
-import { Meta } from './Meta';
-import { Narrative } from './Narrative';
-import { Project } from './Project';
-import { ProjectMembership } from './ProjectMembership';
-import { Reference } from './Reference';
-import { Resource } from './Resource';
-import { ResourceType } from './ResourceType';
-import { SmartAppLaunch } from './SmartAppLaunch';
-import { User } from './User';
+import type { Bot } from './Bot.d.ts';
+import type { ClientApplication } from './ClientApplication.d.ts';
+import type { Extension } from './Extension.d.ts';
+import type { Meta } from './Meta.d.ts';
+import type { Narrative } from './Narrative.d.ts';
+import type { Project } from './Project.d.ts';
+import type { ProjectMembership } from './ProjectMembership.d.ts';
+import type { Reference } from './Reference.d.ts';
+import type { Resource } from './Resource.d.ts';
+import type { ResourceType } from './ResourceType.d.ts';
+import type { SmartAppLaunch } from './SmartAppLaunch.d.ts';
+import type { User } from './User.d.ts';
 
 /**
  * Login event and session details.
@@ -134,7 +134,13 @@ export interface Login {
    * The authentication method used to obtain the code (password or
    * google).
    */
-  authMethod: 'client' | 'exchange' | 'execute' | 'external' | 'google' | 'password';
+  authMethod: 'client' | 'exchange' | 'execute' | 'external' | 'google' | 'password' | 'pre-authorized';
+
+  /**
+   * The hash of the pre-authorized code used to obtain OAuth
+   * Pre-Authorized Code Grant.
+   */
+  preAuthorizedCodeHash?: string;
 
   /**
    * Time when the End-User authentication occurred.
@@ -191,6 +197,17 @@ export interface Login {
   mfaVerified?: boolean;
 
   /**
+   * Single-use 6-digit code for email-based MFA. Set when a code is issued
+   * for this login and cleared on verification.
+   */
+  emailMfa?: LoginEmailMfa;
+
+  /**
+   * The time at which a token will expire for this login.
+   */
+  expiresAt?: string;
+
+  /**
    * Whether a token has been granted for this login.
    */
   granted?: boolean;
@@ -230,4 +247,22 @@ export interface Login {
    * Optional picture URL from the external identity provider.
    */
   pictureUrl?: string;
+}
+
+/**
+ * Single-use 6-digit code for email-based MFA. Set when a code is issued
+ * for this login and cleared on verification.
+ */
+export interface LoginEmailMfa {
+
+  /**
+   * Hashed single-use 6-digit code that was emailed to the user.
+   */
+  codeHash: string;
+
+  /**
+   * The time at which the emailed code expires and can no longer be used
+   * to verify the login.
+   */
+  expiresAt: string;
 }

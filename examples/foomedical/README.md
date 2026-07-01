@@ -65,7 +65,7 @@ You can deploy this application by [clicking here](https://vercel.com/new/clone?
 
 By default, your locally running Foo Medical app is pointing to the hosted Medplum service. Foo Medical registers signups to a test project.
 
-To send patients to your own organization you will need to [register a new Project on Medplum](https://www.medplum.com/docs/tutorials/register) and configure your environment variables to point to your own project (see [config.ts](https://github.com/medplum/foomedical/blob/main/src/config.ts) for an example).
+To send patients to your own organization you will need to [register a new Project on Medplum](https://www.medplum.com/docs/tutorials/register) and configure the values in `.env` to point to your own project.
 
 If you are using the Medplum Hosted service, you can login to your Medplum Instance and add the following identifiers to your [Project Site Settings](https://app.medplum.com/admin/sites)
 
@@ -79,6 +79,77 @@ Contact the medplum team ([support@medplum.com](mailto:support@medplum.com) or [
 ### Data Setup
 
 When you log into Foo Medical a set of sample FHIR records is created on your behalf. The ability to run automations is part of the Medplum platform using a framework called [Bots](https://www.medplum.com/docs/bots). For reference, Bot that created the records in Foo Medical can be found [here](https://github.com/medplum/medplum-demo-bots/blob/main/src/sample-account-setup.ts).
+
+### Scheduling
+
+The "Get Care" page is configured to search for a single `Schedule` resource, and use the first `HealthcareService` found in `Schedule.serviceType` with the `"https://medplum.com/fhir/service-type-reference"` extension.
+
+To set it up, first create a `HealthcareService` with attributes like this:
+```
+{
+  "resourceType": "HealthcareService",
+  "name": "Office Visit",
+  "type": [
+    { "coding": [{ "code": "office-visit" }]}
+  ],
+  "availableTime": [
+    {
+      "daysOfWeek": ["mon", "tue", "wed", "thu", "fri"],
+      "availableStartTime": "09:00:00",
+      "availableEndTime": "17:00:00"
+    }
+  ],
+  "extension": [
+    {
+      "url": "https://medplum.com/fhir/StructureDefinition/SchedulingParameters",
+      "extension": [
+        {
+          "url": "duration",
+          "valueDuration": {
+            "value": 1,
+            "unit": "h"
+          }
+        }
+      ]
+    }
+  ]
+}
+
+```
+
+Next, create a Practitioner's schedule linked to that service, with configuration such as this:
+```
+{
+  "resourceType": "Schedule",
+  "actor": [
+    {
+      "reference": "Practitioner/<Practitioner ID here>",
+      "display": "My Practitioner"
+    }
+  ],
+  "serviceType": [
+    {
+      "coding": [
+        {
+          "code": "office-visit",
+          "display": "Office Visit"
+        }
+      ],
+      "extension": [
+        {
+          "url": "https://medplum.com/fhir/service-type-reference",
+          "valueReference": {
+            "reference": "HealthcareService/<Service ID here>",
+            "display": "Office Visit"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+For more details, see [Defining Availability](https://www.medplum.com/docs/scheduling/defining-availability).
 
 ### Compliance
 

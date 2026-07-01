@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Copyright Orangebot, Inc. and Medplum contributors
 // SPDX-License-Identifier: Apache-2.0
 import type { WithId } from '@medplum/core';
-import { evalFhirPath, getReferenceString, getSearchParameter } from '@medplum/core';
+import { EMPTY, evalFhirPath, getReferenceString, getSearchParameter, getSearchParameterDetails } from '@medplum/core';
 import { readJson } from '@medplum/definitions';
 import type {
   CompartmentDefinition,
@@ -23,9 +23,7 @@ let patientCompartment: CompartmentDefinition | undefined = undefined;
  * @returns The patient compartment definitions.
  */
 export function getPatientCompartments(): CompartmentDefinition {
-  if (!patientCompartment) {
-    patientCompartment = readJson('fhir/r4/compartmentdefinition-patient.json') as CompartmentDefinition;
-  }
+  patientCompartment ??= readJson('fhir/r4/compartmentdefinition-patient.json') as CompartmentDefinition;
   return patientCompartment;
 }
 
@@ -61,16 +59,15 @@ export function getPatients(resource: Resource): (Reference<Patient> & { referen
     result.add(getReferenceString(resource as WithId<Patient>));
   }
   const params = getPatientCompartmentParams(resource.resourceType);
-  if (params) {
-    for (const code of params) {
-      const searchParam = getSearchParameter(resource.resourceType, code);
-      if (searchParam) {
-        const values = evalFhirPath(searchParam.expression as string, resource);
-        for (const value of values) {
-          const patient = getPatientFromUnknownValue(value);
-          if (patient) {
-            result.add(patient);
-          }
+  for (const code of params ?? EMPTY) {
+    const searchParam = getSearchParameter(resource.resourceType, code);
+    if (searchParam) {
+      const details = getSearchParameterDetails(resource.resourceType, searchParam);
+      const values = evalFhirPath(details.parsedExpression, resource);
+      for (const value of values) {
+        const patient = getPatientFromUnknownValue(value);
+        if (patient) {
+          result.add(patient);
         }
       }
     }
@@ -85,7 +82,7 @@ export function getPatients(resource: Resource): (Reference<Patient> & { referen
  */
 function getPatientFromUnknownValue(value: unknown): string | undefined {
   if (value && typeof value === 'object') {
-    return getPatientIdFromReference(value as Reference);
+    return getPatientIdFromReference(value);
   }
   return undefined;
 }

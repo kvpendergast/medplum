@@ -22,10 +22,20 @@ done
 COMMIT_MESSAGE=$(git log -1 --pretty=short)
 echo "$COMMIT_MESSAGE"
 
-FILES_CHANGED=$(git diff --name-only HEAD HEAD~1)
+# When multiple commits land in a single push (e.g. merge queue batching),
+# GITHUB_BEFORE is the SHA that HEAD pointed to before the push. Diffing
+# HEAD..GITHUB_BEFORE covers every commit in the batch, not just the last one.
+# Fall back to HEAD~1 when GITHUB_BEFORE is absent (workflow_dispatch)
+# cat-file -e checks that we have the commit locally in order to diff successfully
+if [[ -n "$GITHUB_BEFORE" ]] && git cat-file -e "$GITHUB_BEFORE" 2>/dev/null; then
+  FILES_CHANGED=$(git diff --name-only HEAD "$GITHUB_BEFORE")
+else
+  FILES_CHANGED=$(git diff --name-only HEAD HEAD~1)
+fi
 echo "$FILES_CHANGED"
 
 DEPLOY_APP=false
+DEPLOY_DOCS=false
 DEPLOY_GRAPHIQL=false
 DEPLOY_SERVER=false
 
@@ -43,6 +53,7 @@ fi
 
 if [[ "$FILES_CHANGED" =~ cicd-deploy.sh ]]; then
   DEPLOY_APP=true
+  DEPLOY_DOCS=true
   DEPLOY_GRAPHIQL=true
   DEPLOY_SERVER=true
 fi
@@ -61,12 +72,17 @@ fi
 
 if [[ "$FILES_CHANGED" =~ packages/core ]]; then
   DEPLOY_APP=true
+  DEPLOY_DOCS=true
   DEPLOY_SERVER=true
 fi
 
 if [[ "$FILES_CHANGED" =~ packages/definitions ]]; then
   DEPLOY_APP=true
   DEPLOY_SERVER=true
+fi
+
+if [[ "$FILES_CHANGED" =~ packages/docs ]]; then
+  DEPLOY_DOCS=true
 fi
 
 if [[ "$FILES_CHANGED" =~ packages/fhir-router ]]; then
@@ -92,6 +108,7 @@ fi
 
 if [[ "$FORCE" = true ]]; then
   DEPLOY_APP=true
+  DEPLOY_DOCS=true
   DEPLOY_GRAPHIQL=true
   DEPLOY_SERVER=true
 fi
@@ -110,7 +127,7 @@ read -r -d '' PAYLOAD <<- EOM
       "type": "section",
       "text": {
         "type": "mrkdwn",
-        "text": "Deploying ${ESCAPED_COMMIT_MESSAGE}\\n\\n* Deploy app: ${DEPLOY_APP}\\n* Deploy graphiql: ${DEPLOY_GRAPHIQL}\\n* Deploy server: ${DEPLOY_SERVER}"
+        "text": "Deploying ${ESCAPED_COMMIT_MESSAGE}\\n\\n* Deploy app: ${DEPLOY_APP}\\n\\n* Deploy docs: ${DEPLOY_DOCS}\\n\\n* Deploy graphiql: ${DEPLOY_GRAPHIQL}\\n\\n* Deploy server: ${DEPLOY_SERVER}"
       }
     }
   ]
@@ -144,7 +161,6 @@ fi
 
 if [[ "$DEPLOY_GRAPHIQL" = true ]]; then
   echo "Deploy GraphiQL"
-  npm run build -- --force --filter=@medplum/graphiql
   source ./scripts/deploy-graphiql.sh
 fi
 
@@ -153,4 +169,10 @@ if [[ "$DEPLOY_SERVER" = true ]]; then
   npm run build -- --force --filter=@medplum/server
   source ./scripts/build-docker-server.sh --latest
   source ./scripts/deploy-server.sh
+fi
+
+# Deploy docs last since it is the slowest
+if [[ "$DEPLOY_DOCS" = true ]]; then
+  echo "Deploy docs"
+  source ./scripts/deploy-docs.sh
 fi

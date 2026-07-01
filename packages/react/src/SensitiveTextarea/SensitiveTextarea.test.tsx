@@ -5,11 +5,11 @@ import { SensitiveTextarea } from './SensitiveTextarea';
 
 describe('SensitiveTextarea', () => {
   test('Renders', async () => {
-    const onChange = jest.fn();
+    const onChange = vi.fn();
 
     render(<SensitiveTextarea placeholder="secret" defaultValue="foo" onChange={onChange} />);
 
-    const input = screen.getByPlaceholderText('secret') as HTMLTextAreaElement;
+    const input = screen.getByPlaceholderText<HTMLTextAreaElement>('secret');
     expect(input).toBeInTheDocument();
 
     await act(async () => {

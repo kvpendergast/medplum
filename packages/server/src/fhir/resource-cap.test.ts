@@ -7,10 +7,10 @@ import request from 'supertest';
 import { initApp, shutdownApp } from '../app';
 import { loadTestConfig } from '../config/loader';
 import type { MedplumServerConfig } from '../config/types';
-import { getRedis } from '../redis';
+import { getRateLimitRedis } from '../redis';
 import type { TestRedisConfig } from '../test.setup';
 import { createTestProject, deleteRedisKeys } from '../test.setup';
-import { getSystemRepo } from './repo';
+import { getProjectSystemRepo } from './repo';
 
 describe('FHIR Resource Limits', () => {
   let app: Express;
@@ -24,6 +24,7 @@ describe('FHIR Resource Limits', () => {
 
   beforeEach(async () => {
     app = express();
+    config.rateLimitsEnabled = true;
     config.defaultRateLimit = -1;
     redisConfig.db = 6; // Use different temp Redis instance for these tests
     redisConfig.keyPrefix = 'resource-cap:';
@@ -31,7 +32,7 @@ describe('FHIR Resource Limits', () => {
   });
 
   afterEach(async () => {
-    await deleteRedisKeys(getRedis(), redisConfig.keyPrefix);
+    await deleteRedisKeys(getRateLimitRedis(), redisConfig.keyPrefix);
     expect(await shutdownApp()).toBeUndefined();
   });
 
@@ -68,6 +69,31 @@ describe('FHIR Resource Limits', () => {
     expect(res4.status).toBe(422);
   });
 
+  test('Allows requests above resource cap when rate limits are disabled', async () => {
+    config.rateLimitsEnabled = false;
+    const { accessToken } = await createTestProject({
+      withAccessToken: true,
+      project: {
+        systemSetting: [
+          { name: 'enableResourceCap', valueBoolean: true },
+          { name: 'resourceCap', valueInteger: 1 },
+        ],
+      },
+    });
+
+    const res = await request(app)
+      .post('/fhir/R4/Patient')
+      .auth(accessToken, { type: 'bearer' })
+      .send({ resourceType: 'Patient' });
+    expect(res.status).toBe(201);
+
+    const res2 = await request(app)
+      .post('/fhir/R4/Patient')
+      .auth(accessToken, { type: 'bearer' })
+      .send({ resourceType: 'Patient' });
+    expect(res2.status).toBe(201);
+  });
+
   test('Loads current count', async () => {
     const { accessToken, project } = await createTestProject({
       withAccessToken: true,
@@ -79,7 +105,7 @@ describe('FHIR Resource Limits', () => {
       },
     });
 
-    const systemRepo = getSystemRepo();
+    const systemRepo = await getProjectSystemRepo(project);
     await systemRepo.createResource({ resourceType: 'Patient', meta: { project: project.id } });
 
     const res = await request(app)
@@ -158,7 +184,7 @@ describe('FHIR Resource Limits', () => {
           { request: { method: 'POST', url: 'Patient' }, resource: { resourceType: 'Patient' } },
           { request: { method: 'POST', url: 'Patient' }, resource: { resourceType: 'Patient' } },
         ],
-      } as Bundle);
+      });
     expect(res.status).toBe(200);
   });
 

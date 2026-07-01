@@ -208,7 +208,7 @@ docker run --rm -it -p 8000:8000 eu.gcr.io/simhospital-images/simhospital:latest
 
 All interactions between a `Bot` and an `Agent`, such as calling `Agent` operations from a `Bot` or calling `Agent` operations that `$execute` a `Bot`, will trigger either the creation of `AuditEvent` resources or the configured logging behavior for the `Bot` (see: [Bot logging configuration](/docs/bots/bots-in-production#configuring-bot-logging)).
 
-:::note
+:::note[]
 
 Because a reference to the `Agent` that interacted with the `Bot` is logged in the `AuditEvent` created by the `Bot`, these events will show up in the `Events` tab for both the `Bot` and the `Agent`.
 
@@ -224,11 +224,11 @@ HL7 Feeds can be extremely high volume, and before you go live with a high-volum
 
 - [HL7 v2](https://www.hl7.org): A widely used low-level message protocol for healthcare data exchange.
 - [DICOM](https://www.dicomstandard.org/): A protocol used for storing metadata about medical images. Currently, Medplum supports the C-STORE and C-ECHO operations. Support for other DICOM operations such C-FIND, C-GET, and C-MOVE is coming soon.
-- [ASTM](https://www.astm.org/): Used to transfer data between clinical instruments and computer systems. ASTM support is still in alpha.
+- [ASTM](https://www.astm.org/): Used to transfer data between clinical instruments and computer systems. ASTM support is still in [alpha](/docs/compliance/alpha-beta).
 
 ## See also
 
-- [Medplum Agent FAQ](/solutions/interoperability/agent-faqs)
+- [Medplum Agent](/solutions/agent)
 - [Medplum Agent design discussion](https://github.com/medplum/medplum/discussions/2012)
 - [Medplum WebSockets design discussion](https://github.com/medplum/medplum/discussions/1490)
 - [FHIR WebSocket Subscriptions](https://build.fhir.org/ig/HL7/fhir-subscription-backport-ig/channels.html#websockets)

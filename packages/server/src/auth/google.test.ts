@@ -3,19 +3,23 @@
 import type { Practitioner, User } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
+import type * as Jose from 'jose';
 import request from 'supertest';
+import { vi } from 'vitest';
 import { initApp, shutdownApp } from '../app';
 import { getConfig, loadTestConfig } from '../config/loader';
-import { getSystemRepo } from '../fhir/repo';
+import type { SystemRepository } from '../fhir/repo';
+import { getShardSystemRepo } from '../fhir/repo';
+import { PLACEHOLDER_SHARD_ID } from '../fhir/sharding';
 import { getUserByEmail } from '../oauth/utils';
 import { withTestContext } from '../test.setup';
 import { registerNew } from './register';
 
-jest.mock('jose', () => {
-  const original = jest.requireActual('jose');
+vi.mock('jose', async () => {
+  const original = await vi.importActual<typeof Jose>('jose');
   return {
     ...original,
-    jwtVerify: jest.fn((credential: string) => {
+    jwtVerify: vi.fn((credential: string) => {
       if (credential === 'invalid') {
         throw new Error('Verification failed');
       }
@@ -32,9 +36,12 @@ jest.mock('jose', () => {
 const app = express();
 
 describe('Google Auth', () => {
+  let systemRepo: SystemRepository;
+
   beforeAll(async () => {
     const config = await loadTestConfig();
     await initApp(app, config);
+    systemRepo = await getShardSystemRepo(PLACEHOLDER_SHARD_ID); // eventually use default shardId from server config
   });
 
   beforeEach(() => {
@@ -176,7 +183,7 @@ describe('Google Auth', () => {
 
   test('Existing user for new project', async () => {
     const email = 'new-google-' + randomUUID() + '@example.com';
-    await getSystemRepo().createResource<User>({
+    await systemRepo.createResource<User>({
       resourceType: 'User',
       firstName: 'Google',
       lastName: 'Google',
@@ -214,7 +221,6 @@ describe('Google Auth', () => {
       });
 
       // As a super admin, update the project to require Google auth
-      const systemRepo = getSystemRepo();
       await systemRepo.updateResource({
         ...project,
         features: ['google-auth-required'],
@@ -253,7 +259,6 @@ describe('Google Auth', () => {
       state.profile = profile as Practitioner;
 
       // As a super admin, update the project to require Google auth
-      const systemRepo = getSystemRepo();
       await systemRepo.updateResource({
         ...project,
         setting: [{ name: 'googleAuthProfilePictures', valueBoolean: true }],
@@ -273,7 +278,6 @@ describe('Google Auth', () => {
     expect(res2.body.code).toBeDefined();
 
     // Now re-fetch the profile
-    const systemRepo = getSystemRepo();
     const updatedProfile = await systemRepo.readResource<Practitioner>('Practitioner', state.profile?.id as string);
     expect(updatedProfile.photo).toBeDefined();
     expect(updatedProfile.photo?.[0].url).toBe('https://example.com/picture.jpg');
@@ -295,7 +299,6 @@ describe('Google Auth', () => {
       });
 
       // As a super admin, set the google client ID
-      const systemRepo = getSystemRepo();
       await systemRepo.updateResource({
         ...project,
         site: [
@@ -338,7 +341,6 @@ describe('Google Auth', () => {
         });
 
         // As a super admin, set the google client ID
-        const systemRepo = getSystemRepo();
         await systemRepo.updateResource({
           ...project,
           site: [
@@ -384,7 +386,6 @@ describe('Google Auth', () => {
       });
 
       // As a super admin, set the google client ID
-      const systemRepo = getSystemRepo();
       await systemRepo.updateResource({
         ...project,
         site: [
@@ -427,7 +428,6 @@ describe('Google Auth', () => {
       });
 
       // As a super admin, set the google client ID
-      const systemRepo = getSystemRepo();
       await systemRepo.updateResource({
         ...project,
         site: [

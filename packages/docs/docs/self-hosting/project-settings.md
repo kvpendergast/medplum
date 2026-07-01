@@ -30,13 +30,13 @@ are:
 | Feature                   | Description                                                                                                                      |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | `bots`                    | Project is allowed to create and run [Bots](/docs/bots/bot-basics)                                                               |
-| `cron`                    | Can run Bots periodically on [CRON timers](https://www.medplum.com/docs/bots/bot-cron-job)                                       |
+| `cron`                    | Can run Bots periodically on [CRON timers](/docs/bots/bot-cron-job)                                       |
 | `email`                   | Bots in this project can [send emails](/docs/sdk/core.medplumclient.sendemail)                                                   |
 | `google-auth-required`    | [Google authentication](/docs/auth/google-auth) is the only method allowed                                                       |
 | `graphql-introspection`   | Allows potentially-expensive [GraphQL schema introspection](/docs/graphql) queries                                               |
 | `terminology`             | Enable full standards-compliant implementation for the [`ValueSet/$expand` operation](/docs/api/fhir/operations/valueset-expand) |
 | `websocket-subscriptions` | Allows setting up a [Subscription](/docs/subscriptions) over Websockets                                                          |
-| `transaction-bundles`     | Use strong database transaction isolation for `transaction` Bundles                                                              |
+| `transaction-bundles`     | Process `transaction` Bundles atomically. Without this flag, `transaction` Bundles are processed as batches. See [FHIR Batch Requests](/docs/fhir-datastore/fhir-batch-requests#transaction-limits) |
 
 ## Project system settings
 
@@ -55,3 +55,11 @@ The supported options that can be specified by a Super Admin in `Project.systemS
 | `enableFhirQuota`              | boolean | If true, the totalFhirQuota limit will be enforced, returning `429 Too Many Requests` errors when the limit is exceeded over a minute. Please note that as of `v4.1.6`, FHIR quotas are enabled by default.                               | true    |
 | `searchOnReader`               | boolean | If true, FHIR search requests (except in batch requests) are served by the reader database pool if available                                                                                                                              | false   |
 | `redactAuditEvents`            | boolean | If true, remove human-readable detail strings from AuditEvent resources saved to the database and logs                                                                                                                                    | false   |
+
+## Multi-factor authentication
+
+The MFA methods users in a Project can enroll in are controlled by the `allowedMfaMethods` key in `Project.setting`, a comma-delimited list of `totp` and/or `email`. When unset, only authenticator-app (TOTP) MFA is offered. See [Configuring allowed MFA methods](/docs/auth/mfa#configuring-allowed-mfa-methods) for details and examples, including how to enable email-based MFA.
+
+## Project SMTP
+
+Projects can send email through their own SMTP relay instead of the server-wide email provider, configured via `Project.secret` entries. See [Project SMTP](/docs/user-management/project-smtp) for the full configuration reference. Operators can disable this fleet-wide with the [`allowProjectSmtp`](/docs/self-hosting/server-config#allowprojectsmtp) server config setting.

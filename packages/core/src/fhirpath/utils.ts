@@ -62,7 +62,8 @@ export function singleton(collection: TypedValue[], type?: string): TypedValue |
   } else if (collection.length === 1 && (!type || collection[0].type === type)) {
     return collection[0];
   } else {
-    throw new Error(`Expected singleton of type ${type}, but found ${JSON.stringify(collection)}`);
+    const ofTypePhrase = type ? ` of type ${type}` : '';
+    throw new Error(`Expected singleton${ofTypePhrase}, but found ${JSON.stringify(collection)}`);
   }
 }
 
@@ -146,8 +147,17 @@ export function getTypedPropertyValueWithSchema(
 
   const lastPathSegmentIndex = element.path.lastIndexOf('.');
   const lastPathSegment = element.path.substring(lastPathSegmentIndex + 1);
+  let lastPathSegmentTrimmed = lastPathSegment;
+  let choiceOfType = false;
+  if (lastPathSegment.endsWith('[x]')) {
+    lastPathSegmentTrimmed = lastPathSegment.substring(0, lastPathSegment.length - 3);
+    choiceOfType = true;
+  }
   for (const type of types) {
-    const candidatePath = lastPathSegment.replace('[x]', capitalize(type.code));
+    let candidatePath = lastPathSegmentTrimmed;
+    if (choiceOfType) {
+      candidatePath += capitalize(type.code);
+    }
     resultValue = value[candidatePath];
     primitiveExtension = value['_' + candidatePath];
     if (resultValue !== undefined || primitiveExtension !== undefined) {
@@ -506,24 +516,18 @@ export function isPeriod(input: unknown): input is Period {
  * @returns A Period object or undefined.
  */
 export function toPeriod(input: unknown): Period | undefined {
-  if (!input) {
-    return undefined;
-  }
-
   if (isDateString(input) || isDateTimeString(input)) {
     return {
       start: dateStringToInstantString(input, '0000-01-01T00:00:00.000'),
       end: dateStringToInstantString(input, 'xxxx-12-31T23:59:59.999'),
     };
   }
-
   if (isPeriod(input)) {
     return {
       start: input.start ? dateStringToInstantString(input.start, '0000-01-01T00:00:00.000') : undefined,
       end: input.end ? dateStringToInstantString(input.end, 'xxxx-12-31T23:59:59.999') : undefined,
     };
   }
-
   return undefined;
 }
 
