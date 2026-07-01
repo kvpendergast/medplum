@@ -986,6 +986,82 @@
       }
     },
     {
+      "fullUrl": "https://medplum.com/fhir/SearchParameter/Assistant-tool",
+      "resource": {
+        "resourceType": "SearchParameter",
+        "id": "Assistant-tool",
+        "url": "https://medplum.com/fhir/SearchParameter/Assistant-tool",
+        "version": "4.0.1",
+        "name": "tool",
+        "status": "draft",
+        "publisher": "Medplum",
+        "description": "Search for Assistant by tool reference",
+        "code": "tool",
+        "base": [
+          "Assistant"
+        ],
+        "type": "reference",
+        "expression": "Assistant.tool"
+      }
+    },
+    {
+      "fullUrl": "https://medplum.com/fhir/SearchParameter/AssistantTool-name",
+      "resource": {
+        "resourceType": "SearchParameter",
+        "id": "AssistantTool-name",
+        "url": "https://medplum.com/fhir/SearchParameter/AssistantTool-name",
+        "version": "4.0.1",
+        "name": "name",
+        "status": "draft",
+        "publisher": "Medplum",
+        "description": "Search for AssistantTool by name",
+        "code": "name",
+        "base": [
+          "AssistantTool"
+        ],
+        "type": "string",
+        "expression": "AssistantTool.name"
+      }
+    },
+    {
+      "fullUrl": "https://medplum.com/fhir/SearchParameter/AssistantTool-identifier",
+      "resource": {
+        "resourceType": "SearchParameter",
+        "id": "AssistantTool-identifier",
+        "url": "https://medplum.com/fhir/SearchParameter/AssistantTool-identifier",
+        "version": "4.0.1",
+        "name": "identifier",
+        "status": "draft",
+        "publisher": "Medplum",
+        "description": "The identifier of the assistant tool",
+        "code": "identifier",
+        "base": [
+          "AssistantTool"
+        ],
+        "type": "token",
+        "expression": "AssistantTool.identifier"
+      }
+    },
+    {
+      "fullUrl": "https://medplum.com/fhir/SearchParameter/AssistantTool-assistant",
+      "resource": {
+        "resourceType": "SearchParameter",
+        "id": "AssistantTool-assistant",
+        "url": "https://medplum.com/fhir/SearchParameter/AssistantTool-assistant",
+        "version": "4.0.1",
+        "name": "assistant",
+        "status": "draft",
+        "publisher": "Medplum",
+        "description": "Search for AssistantTool by assistant reference",
+        "code": "assistant",
+        "base": [
+          "AssistantTool"
+        ],
+        "type": "reference",
+        "expression": "AssistantTool.assistant"
+      }
+    },
+    {
       "fullUrl": "https://medplum.com/fhir/SearchParameter/priority-order",
       "resource": {
         "resourceType": "SearchParameter",

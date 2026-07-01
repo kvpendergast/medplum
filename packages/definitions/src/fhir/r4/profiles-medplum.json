@@ -10329,6 +10329,269 @@
       }
     },
     {
+      "fullUrl": "https://medplum.com/fhir/StructureDefinition/AssistantTool",
+      "resource": {
+        "resourceType": "StructureDefinition",
+        "id": "AssistantTool",
+        "name": "AssistantTool",
+        "url": "https://medplum.com/fhir/StructureDefinition/AssistantTool",
+        "status": "active",
+        "kind": "resource",
+        "abstract": false,
+        "type": "AssistantTool",
+        "baseDefinition": "http://hl7.org/fhir/StructureDefinition/DomainResource",
+        "description": "Tool definition for an AI assistant.",
+        "snapshot": {
+          "element": [
+            {
+              "id": "AssistantTool",
+              "path": "AssistantTool",
+              "short": "Tool definition for an AI assistant.",
+              "definition": "Tool definition for an AI assistant.",
+              "min": 0,
+              "max": "*",
+              "base": {
+                "path": "AssistantTool",
+                "min": 0,
+                "max": "*"
+              }
+            },
+            {
+              "id": "AssistantTool.id",
+              "path": "AssistantTool.id",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "Resource.id",
+                "min": 0,
+                "max": "1"
+              },
+              "short": "Logical id of this artifact",
+              "definition": "The logical id of the resource, as used in the URL for the resource. Once assigned, this value never changes.",
+              "type": [
+                {
+                  "code": "string"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.meta",
+              "path": "AssistantTool.meta",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "Resource.meta",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "The metadata about the resource. This is content that is maintained by the infrastructure. Changes to the content might not always be associated with version changes to the resource.",
+              "type": [
+                {
+                  "code": "Meta"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.implicitRules",
+              "path": "AssistantTool.implicitRules",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "Resource.implicitRules",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "A reference to a set of rules that were followed when the resource was constructed, and which must be understood when processing the content. Often, this is a reference to an implementation guide that defines the special rules along with other profiles etc.",
+              "type": [
+                {
+                  "code": "uri"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.language",
+              "path": "AssistantTool.language",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "Resource.language",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "The base language in which the resource is written.",
+              "type": [
+                {
+                  "code": "code"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.text",
+              "path": "AssistantTool.text",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "DomainResource.text",
+                "min": 0,
+                "max": "1"
+              },
+              "short": "Text summary of the resource, for human interpretation",
+              "definition": "A human-readable narrative that contains a summary of the resource and can be used to represent the content of the resource to a human. The narrative need not encode all the structured data, but is required to contain sufficient detail to make it \"clinically safe\" for a human to just read the narrative. Resource definitions may define what content should be represented in the narrative to ensure clinical safety.",
+              "type": [
+                {
+                  "code": "Narrative"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.contained",
+              "path": "AssistantTool.contained",
+              "min": 0,
+              "max": "*",
+              "base": {
+                "path": "DomainResource.contained",
+                "min": 0,
+                "max": "*"
+              },
+              "short": "Contained, inline Resources",
+              "definition": "These resources do not have an independent existence apart from the resource that contains them - they cannot be identified independently, and nor can they have their own independent transaction scope.",
+              "type": [
+                {
+                  "code": "Resource"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.extension",
+              "path": "AssistantTool.extension",
+              "min": 0,
+              "max": "*",
+              "base": {
+                "path": "DomainResource.extension",
+                "min": 0,
+                "max": "*"
+              },
+              "short": "Additional content defined by implementations",
+              "definition": "May be used to represent additional information that is not part of the basic definition of the resource. To make the use of extensions safe and manageable, there is a strict set of governance  applied to the definition and use of extensions. Though any implementer can define an extension, there is a set of requirements that SHALL be met as part of the definition of the extension.",
+              "type": [
+                {
+                  "code": "Extension"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.modifierExtension",
+              "path": "AssistantTool.modifierExtension",
+              "min": 0,
+              "max": "*",
+              "base": {
+                "path": "DomainResource.modifierExtension",
+                "min": 0,
+                "max": "*"
+              },
+              "short": "Extensions that cannot be ignored",
+              "definition": "May be used to represent additional information that is not part of the basic definition of the resource and that modifies the understanding of the element that contains it and/or the understanding of the containing element's descendants. Usually modifier elements provide negation or qualification. To make the use of extensions safe and manageable, there is a strict set of governance applied to the definition and use of extensions. Though any implementer is allowed to define an extension, there is a set of requirements that SHALL be met as part of the definition of the extension. Applications processing a resource are required to check for modifier extensions.\n\nModifier extensions SHALL NOT change the meaning of any elements on Resource or DomainResource (including cannot change the meaning of modifierExtension itself).",
+              "type": [
+                {
+                  "code": "Extension"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.identifier",
+              "path": "AssistantTool.identifier",
+              "min": 0,
+              "max": "*",
+              "base": {
+                "path": "AssistantTool.identifier",
+                "min": 0,
+                "max": "*"
+              },
+              "short": "An identifier for this tool",
+              "definition": "A formal identifier that is used to identify this tool.",
+              "type": [
+                {
+                  "code": "Identifier"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.name",
+              "path": "AssistantTool.name",
+              "min": 1,
+              "max": "1",
+              "base": {
+                "path": "AssistantTool.name",
+                "min": 1,
+                "max": "1"
+              },
+              "short": "The tool name.",
+              "definition": "The tool name used when invoking the tool with an LLM.",
+              "type": [
+                {
+                  "code": "string"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.description",
+              "path": "AssistantTool.description",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "AssistantTool.description",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "A human-readable description of the tool.",
+              "type": [
+                {
+                  "code": "string"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.parameterSchema",
+              "path": "AssistantTool.parameterSchema",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "AssistantTool.parameterSchema",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "JSON schema describing the tool parameters.",
+              "type": [
+                {
+                  "code": "string"
+                }
+              ]
+            },
+            {
+              "id": "AssistantTool.assistant",
+              "path": "AssistantTool.assistant",
+              "min": 0,
+              "max": "1",
+              "base": {
+                "path": "AssistantTool.assistant",
+                "min": 0,
+                "max": "1"
+              },
+              "definition": "The assistant that uses this tool.",
+              "type": [
+                {
+                  "code": "Reference",
+                  "targetProfile": [
+                    "https://medplum.com/fhir/StructureDefinition/Assistant"
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
       "fullUrl": "https://medplum.com/fhir/StructureDefinition/Assistant",
       "resource": {
         "resourceType": "StructureDefinition",
@@ -10666,70 +10929,22 @@
               ]
             },
             {
-              "id": "Assistant.tools",
-              "path": "Assistant.tools",
+              "id": "Assistant.tool",
+              "path": "Assistant.tool",
               "min": 0,
               "max": "*",
               "base": {
-                "path": "Assistant.tools",
+                "path": "Assistant.tool",
                 "min": 0,
                 "max": "*"
               },
-              "definition": "Tool definitions available to the assistant.",
+              "definition": "References to tool definitions used by this assistant.",
               "type": [
                 {
-                  "code": "BackboneElement"
-                }
-              ]
-            },
-            {
-              "id": "Assistant.tools.name",
-              "path": "Assistant.tools.name",
-              "min": 1,
-              "max": "1",
-              "base": {
-                "path": "Assistant.tools.name",
-                "min": 1,
-                "max": "1"
-              },
-              "definition": "The tool name.",
-              "type": [
-                {
-                  "code": "string"
-                }
-              ]
-            },
-            {
-              "id": "Assistant.tools.description",
-              "path": "Assistant.tools.description",
-              "min": 0,
-              "max": "1",
-              "base": {
-                "path": "Assistant.tools.description",
-                "min": 0,
-                "max": "1"
-              },
-              "definition": "A human-readable description of the tool.",
-              "type": [
-                {
-                  "code": "string"
-                }
-              ]
-            },
-            {
-              "id": "Assistant.tools.parameterSchema",
-              "path": "Assistant.tools.parameterSchema",
-              "min": 0,
-              "max": "1",
-              "base": {
-                "path": "Assistant.tools.parameterSchema",
-                "min": 0,
-                "max": "1"
-              },
-              "definition": "JSON schema describing the tool parameters.",
-              "type": [
-                {
-                  "code": "string"
+                  "code": "Reference",
+                  "targetProfile": [
+                    "https://medplum.com/fhir/StructureDefinition/AssistantTool"
+                  ]
                 }
               ]
             },

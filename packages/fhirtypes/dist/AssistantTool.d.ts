@@ -5,10 +5,7 @@
  * Do not edit manually.
  */
 
-import type { AssistantTool } from './AssistantTool.d.ts';
-import type { Attachment } from './Attachment.d.ts';
-import type { Bot } from './Bot.d.ts';
-import type { Coding } from './Coding.d.ts';
+import type { Assistant } from './Assistant.d.ts';
 import type { Extension } from './Extension.d.ts';
 import type { Identifier } from './Identifier.d.ts';
 import type { Meta } from './Meta.d.ts';
@@ -17,14 +14,14 @@ import type { Reference } from './Reference.d.ts';
 import type { Resource } from './Resource.d.ts';
 
 /**
- * AI assistant configuration for a project.
+ * Tool definition for an AI assistant.
  */
-export interface Assistant {
+export interface AssistantTool {
 
   /**
-   * This is a Assistant resource
+   * This is a AssistantTool resource
    */
-  readonly resourceType: 'Assistant';
+  readonly resourceType: 'AssistantTool';
 
   /**
    * The logical id of the resource, as used in the URL for the resource.
@@ -98,76 +95,27 @@ export interface Assistant {
   modifierExtension?: Extension[];
 
   /**
-   * An absolute URI that is used to identify this assistant when it is
-   * referenced in a specification, model, design or an instance; also
-   * called its canonical identifier. This SHOULD be globally unique and
-   * SHOULD be a literal address at which an authoritative instance of this
-   * assistant is (or will be) published. This URL can be the target of a
-   * canonical reference. It SHALL remain the same when the assistant is
-   * stored on different servers.
-   */
-  url: string;
-
-  /**
-   * A formal identifier that is used to identify this assistant when it is
-   * represented in other formats, or referenced in a specification, model,
-   * design or an instance.
+   * A formal identifier that is used to identify this tool.
    */
   identifier?: Identifier[];
 
   /**
-   * The identifier that is used to identify this version of the assistant
-   * when it is referenced in a specification, model, design or an
-   * instance. This is an arbitrary value managed by the assistant author
-   * and is not expected to be globally unique. There may be different
-   * assistant instances that have the same url but different versions.
-   */
-  version?: string;
-
-  /**
-   * The human readable friendly name of the assistant.
+   * The tool name used when invoking the tool with an LLM.
    */
   name: string;
 
   /**
-   * A summary, characterization or explanation of the assistant.
+   * A human-readable description of the tool.
    */
   description?: string;
 
   /**
-   * The status of the assistant.
+   * JSON schema describing the tool parameters.
    */
-  status: 'active' | 'off' | 'draft';
+  parameterSchema?: string;
 
   /**
-   * The LLM model to use for this assistant. The coding system identifies
-   * the model provider and the code identifies the model within that
-   * provider.
+   * The assistant that uses this tool.
    */
-  model?: Coding;
-
-  /**
-   * Default system instructions for the assistant.
-   */
-  systemPrompt?: string;
-
-  /**
-   * Optional bot that provides tool execution for this assistant.
-   */
-  bot?: Reference<Bot>;
-
-  /**
-   * References to tool definitions used by this assistant.
-   */
-  tool?: Reference<AssistantTool>[];
-
-  /**
-   * Sampling temperature for the model.
-   */
-  temperature?: number;
-
-  /**
-   * Image of the assistant.
-   */
-  photo?: Attachment;
+  assistant?: Reference<Assistant>;
 }

@@ -33,6 +33,11 @@
             "definition": "AI assistant configuration for a project."
           },
           {
+            "code": "AssistantTool",
+            "display": "AssistantTool",
+            "definition": "Tool definition for an AI assistant."
+          },
+          {
             "code": "Bot",
             "display": "Bot",
             "definition": "Bot account for automated actions."

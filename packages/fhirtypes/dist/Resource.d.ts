@@ -14,6 +14,7 @@ import type { AllergyIntolerance } from './AllergyIntolerance.d.ts';
 import type { Appointment } from './Appointment.d.ts';
 import type { AppointmentResponse } from './AppointmentResponse.d.ts';
 import type { Assistant } from './Assistant.d.ts';
+import type { AssistantTool } from './AssistantTool.d.ts';
 import type { AsyncJob } from './AsyncJob.d.ts';
 import type { AuditEvent } from './AuditEvent.d.ts';
 import type { Basic } from './Basic.d.ts';
@@ -182,6 +183,7 @@ export type Resource = AccessPolicy
   | Appointment
   | AppointmentResponse
   | Assistant
+  | AssistantTool
   | AsyncJob
   | AuditEvent
   | Basic
