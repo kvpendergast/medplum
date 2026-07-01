@@ -16,6 +16,7 @@ export type * from './AllergyIntolerance.d.ts';
 export type * from './Annotation.d.ts';
 export type * from './Appointment.d.ts';
 export type * from './AppointmentResponse.d.ts';
+export type * from './Assistant.d.ts';
 export type * from './AsyncJob.d.ts';
 export type * from './Attachment.d.ts';
 export type * from './AuditEvent.d.ts';
